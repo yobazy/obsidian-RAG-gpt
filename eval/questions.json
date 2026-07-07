@@ -1,0 +1,62 @@
+[
+  {
+    "question": "What exercises are part of the morning routine?",
+    "expected_keywords": ["10 push ups", "25 jumping jacks", "1 min plank"]
+  },
+  {
+    "question": "How much debt is remaining, and what is the monthly payment toward it?",
+    "expected_keywords": ["$17,000", "$4,000", "monthly"]
+  },
+  {
+    "question": "When is the projected debt-free date, and what milestone does it coincide with?",
+    "expected_keywords": ["august 2026", "29th birthday", "july 16"]
+  },
+  {
+    "question": "What is the current weekly focus in Level Up HQ?",
+    "expected_keywords": ["okta", "assessment", "follow up"]
+  },
+  {
+    "question": "What is the personal mantra written in Level Up HQ?",
+    "expected_keywords": ["green lights", "lead", "initiate", "build"]
+  },
+  {
+    "question": "Which cities are on the Peru trip itinerary?",
+    "expected_keywords": ["lima", "cusco", "machu picchu"]
+  },
+  {
+    "question": "What altitude medication is on the Peru packing list?",
+    "expected_keywords": ["diamox", "altitude"]
+  },
+  {
+    "question": "What CPU and GPU are in the old PC (pre-April 2025 upgrades)?",
+    "expected_keywords": ["i7-10700k", "rtx 3060 ti"]
+  },
+  {
+    "question": "What supplements are currently being taken and at what dose is Alpha GPC?",
+    "expected_keywords": ["alpha gpc", "300mg", "bcaa"]
+  },
+  {
+    "question": "What group Halloween costume are Hussain and Scott doing?",
+    "expected_keywords": ["hussain", "scott", "80", "workout"]
+  },
+  {
+    "question": "Which OMSCS course is currently in progress with an upcoming exam?",
+    "expected_keywords": ["cs 6310", "exam"]
+  },
+  {
+    "question": "After the debt is paid off in August, how will the $4k per month be redirected?",
+    "expected_keywords": ["$2.5k savings", "$1k travel fund", "$500 buffer"]
+  },
+  {
+    "question": "What items are on the bucket list?",
+    "expected_keywords": ["elephants", "polished ep", "southeast asia"]
+  },
+  {
+    "question": "According to the Communicating with Confidence course notes, what are the three elements of communication?",
+    "expected_keywords": ["vocal", "visual", "verbal"]
+  },
+  {
+    "question": "Which two European cities are being considered for the first post-debt trip?",
+    "expected_keywords": ["athens", "dublin"]
+  }
+]
