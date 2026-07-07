@@ -23,25 +23,53 @@ voyage = voyageai.Client(api_key=VOYAGE_API_KEY)
 claude = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 console = Console()
 
-def retrieve(conn, query, top_k=5):
-    """Embed the query and find the most similar chunks."""
+def retrieve(conn, query, top_k=5, min_similarity=0.35):
+    """Embed the query, find similar chunks, expand via backlinks."""
     result = voyage.embed([query], model="voyage-3", input_type="query")
     query_embedding = result.embeddings[0]
 
     with conn.cursor() as cur:
         cur.execute("""
-            SELECT file_path, content,
+            SELECT file_path, content, backlinks,
                    1 - (embedding <=> %s::vector) AS similarity
             FROM chunks
+            WHERE 1 - (embedding <=> %s::vector) > %s
             ORDER BY embedding <=> %s::vector
             LIMIT %s
-        """, (query_embedding, query_embedding, top_k))
-        rows = cur.fetchall()
+        """, (query_embedding, query_embedding, min_similarity, query_embedding, top_k))
+        primary = cur.fetchall()
 
-    return [
-        {"file": row[0], "content": row[1], "similarity": row[2]}
-        for row in rows
-    ]
+        if not primary:
+            return []
+
+        linked_names = set()
+        for row in primary:
+            for link in (row[2] or []):
+                linked_names.add(link.lower())
+
+        linked_chunks = []
+        if linked_names:
+            cur.execute("""
+                SELECT file_path, content, backlinks, 0.0 AS similarity
+                FROM chunks
+                WHERE LOWER(REPLACE(SPLIT_PART(file_path, '/', -1), '.md', '')) = ANY(%s)
+                LIMIT 10
+            """, (list(linked_names),))
+            linked_chunks = cur.fetchall()
+
+    seen = set()
+    results = []
+    for row in list(primary) + linked_chunks:
+        key = (row[0], row[1][:50])
+        if key not in seen:
+            seen.add(key)
+            results.append({
+                "file": row[0],
+                "content": row[1],
+                "similarity": row[3],
+            })
+
+    return results
 
 def build_context(chunks):
     """Format retrieved chunks into a context block for Claude."""

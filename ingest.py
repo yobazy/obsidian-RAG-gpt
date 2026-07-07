@@ -32,8 +32,13 @@ def setup_db(conn):
                 chunk_index INTEGER NOT NULL,
                 content TEXT NOT NULL,
                 embedding vector(1024),
+                backlinks TEXT[] DEFAULT '{}',
                 UNIQUE(file_path, chunk_index)
             );
+        """)
+        cur.execute("""
+            ALTER TABLE chunks
+            ADD COLUMN IF NOT EXISTS backlinks TEXT[] DEFAULT '{}';
         """)
         cur.execute("""
             CREATE INDEX IF NOT EXISTS chunks_embedding_idx
@@ -59,13 +64,17 @@ def chunk_text(text, chunk_size=400, overlap=50):
         start += chunk_size - overlap
     return chunks
 
+def extract_backlinks(text):
+    """Extract all [[note name]] links from raw markdown."""
+    return re.findall(r'\[\[([^\]]+)\]\]', text)
+
 def clean_markdown(text):
     """Strip markdown syntax for cleaner embeddings."""
-    text = re.sub(r'```.*?```', '', text, flags=re.DOTALL)  # code blocks
-    text = re.sub(r'#+ ', '', text)                          # headings
-    text = re.sub(r'\[\[.*?\]\]', '', text)                  # obsidian links
-    text = re.sub(r'\[.*?\]\(.*?\)', '', text)               # markdown links
-    text = re.sub(r'[*_`>-]', '', text)                      # formatting
+    text = re.sub(r'```.*?```', '', text, flags=re.DOTALL)
+    text = re.sub(r'#+ ', '', text)
+    text = re.sub(r'\[\[.*?\]\]', '', text)
+    text = re.sub(r'\[.*?\]\(.*?\)', '', text)
+    text = re.sub(r'[*_`>-]', '', text)
     return text.strip()
 
 def ingest_file(conn, file_path):
@@ -86,28 +95,36 @@ def ingest_file(conn, file_path):
         )
         row = cur.fetchone()
         if row and row[0] == fhash:
-            return 0  # unchanged, skip
+            backlinks = extract_backlinks(raw)
+            cur.execute(
+                "UPDATE chunks SET backlinks = %s WHERE file_path = %s",
+                (backlinks, str(file_path)),
+            )
+            conn.commit()
+            return 0  # unchanged, skip re-embedding
 
         # Delete old chunks for this file if hash changed
         cur.execute("DELETE FROM chunks WHERE file_path = %s", (str(file_path),))
 
-    # Embed all chunks in one batch call
+    backlinks = extract_backlinks(raw)
+
     result = voyage.embed(chunks, model="voyage-3", input_type="document")
     embeddings = result.embeddings
 
     rows = [
-        (str(file_path), fhash, i, chunk, emb)
+        (str(file_path), fhash, i, chunk, emb, backlinks)
         for i, (chunk, emb) in enumerate(zip(chunks, embeddings))
     ]
 
     with conn.cursor() as cur:
         execute_values(cur, """
-            INSERT INTO chunks (file_path, file_hash, chunk_index, content, embedding)
+            INSERT INTO chunks (file_path, file_hash, chunk_index, content, embedding, backlinks)
             VALUES %s
             ON CONFLICT (file_path, chunk_index) DO UPDATE
             SET content = EXCLUDED.content,
                 embedding = EXCLUDED.embedding,
-                file_hash = EXCLUDED.file_hash
+                file_hash = EXCLUDED.file_hash,
+                backlinks = EXCLUDED.backlinks
         """, rows)
     conn.commit()
     return len(chunks)

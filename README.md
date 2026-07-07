@@ -19,7 +19,8 @@ Ingestion (ingest.py)          Auto re-ingestion (watch.py)
 pgvector (Postgres via Docker)
         ↓
 Retrieval + Generation (chat.py)
-  — semantic search over embeddings
+  — semantic search over embeddings (with similarity threshold)
+  — expands context via Obsidian [[backlinks]]
   — Claude answers grounded in retrieved context
         ↓
 CLI chat interface
@@ -117,6 +118,8 @@ python chat.py
 
 - **Hash-based change detection** — only re-ingests notes that have changed
 - **Auto re-ingestion** — `watch.py` keeps the index up to date as you edit notes in Obsidian
+- **Backlink-aware retrieval** — expands retrieved context to include notes linked via `[[wikilinks]]`
+- **Similarity threshold** — filters out low-confidence chunks before they reach the LLM
 - **Source attribution** — every answer shows which notes it drew from, with similarity scores
 - **Overlapping chunks** — 400-word chunks with 50-word overlap for better context continuity
 - **Obsidian markdown stripping** — cleans `[[links]]`, headings, and formatting before embedding for cleaner vectors
@@ -125,8 +128,8 @@ python chat.py
 ## Roadmap
 
 - [x] Watchdog-based auto re-ingestion on file save
-- [ ] Backlink-aware retrieval using Obsidian's `[[note]]` graph
-- [ ] Similarity threshold filtering
+- [x] Backlink-aware retrieval using Obsidian's `[[note]]` graph
+- [x] Similarity threshold filtering
 - [ ] Eval harness with scored Q&A pairs
 - [ ] React frontend
 
