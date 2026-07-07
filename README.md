@@ -112,6 +112,20 @@ It watches `VAULT_PATH` recursively and re-ingests any `.md` file the moment you
 python chat.py
 ```
 
+### 8. Run the eval harness
+
+Score retrieval and answer quality against hand-written Q&A pairs from your notes:
+
+```bash
+# Full eval (retrieval + Claude answers)
+python eval.py
+
+# Retrieval only — fast, no LLM API calls
+python eval.py --retrieval-only
+```
+
+Questions live in `eval/questions.json`. Each case lists `expected_keywords` that should appear in retrieved context and/or the generated answer.
+
 ---
 
 ## Features
@@ -124,13 +138,14 @@ python chat.py
 - **Overlapping chunks** — 400-word chunks with 50-word overlap for better context continuity
 - **Obsidian markdown stripping** — cleans `[[links]]`, headings, and formatting before embedding for cleaner vectors
 - **Conversational memory** — chat maintains context across turns within a session
+- **Eval harness** — scored Q&A pairs to measure retrieval and answer quality (`eval.py`)
 
 ## Roadmap
 
 - [x] Watchdog-based auto re-ingestion on file save
 - [x] Backlink-aware retrieval using Obsidian's `[[note]]` graph
 - [x] Similarity threshold filtering
-- [ ] Eval harness with scored Q&A pairs
+- [x] Eval harness with scored Q&A pairs
 - [ ] React frontend
 
 ---
