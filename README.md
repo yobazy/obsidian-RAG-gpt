@@ -11,8 +11,9 @@ A local RAG (Retrieval-Augmented Generation) pipeline over your Obsidian vault. 
 ```
 Obsidian Vault (.md files)
         ↓
-Ingestion (ingest.py)
-  — walks vault, chunks notes, embeds via Voyage AI
+Ingestion (ingest.py)          Auto re-ingestion (watch.py)
+  — walks vault, chunks notes    — watches vault for saves
+  — embeds via Voyage AI         — re-ingests changed notes on the fly
   — stores chunks + embeddings in pgvector
         ↓
 pgvector (Postgres via Docker)
@@ -26,10 +27,11 @@ CLI chat interface
 
 ## Stack
 
-- **Python** — ingestion and retrieval scripts
+- **Python** — ingestion, watching, and retrieval scripts
 - **PostgreSQL + pgvector** — vector storage and similarity search (Docker)
 - **Voyage AI** (`voyage-3`) — document and query embeddings
 - **Claude API** (`claude-sonnet-4-6`) — answer generation
+- **Watchdog** — filesystem watcher for auto re-ingestion
 - **Rich** — CLI interface
 
 ---
@@ -93,7 +95,17 @@ python ingest.py
 
 This walks your vault, chunks each note, embeds via Voyage AI, and stores in pgvector. Re-ingestion is hash-based — unchanged files are skipped automatically.
 
-### 6. Start chatting
+### 6. (Optional) Watch for changes
+
+Run this in a separate terminal to keep your index in sync as you edit notes:
+
+```bash
+python watch.py
+```
+
+It watches `VAULT_PATH` recursively and re-ingests any `.md` file the moment you save it. Press `Ctrl+C` to stop.
+
+### 7. Start chatting
 
 ```bash
 python chat.py
@@ -104,6 +116,7 @@ python chat.py
 ## Features
 
 - **Hash-based change detection** — only re-ingests notes that have changed
+- **Auto re-ingestion** — `watch.py` keeps the index up to date as you edit notes in Obsidian
 - **Source attribution** — every answer shows which notes it drew from, with similarity scores
 - **Overlapping chunks** — 400-word chunks with 50-word overlap for better context continuity
 - **Obsidian markdown stripping** — cleans `[[links]]`, headings, and formatting before embedding for cleaner vectors
@@ -111,7 +124,7 @@ python chat.py
 
 ## Roadmap
 
-- [ ] Watchdog-based auto re-ingestion on file save
+- [x] Watchdog-based auto re-ingestion on file save
 - [ ] Backlink-aware retrieval using Obsidian's `[[note]]` graph
 - [ ] Similarity threshold filtering
 - [ ] Eval harness with scored Q&A pairs
