@@ -2,6 +2,8 @@
 
 > Ask questions about your own notes. Get answers backed by what you actually wrote.
 
+![A chat session in the terminal: a question, an answer drawn from the notes, and the source notes with similarity scores](docs/screenshot.png)
+
 A local RAG (Retrieval-Augmented Generation) pipeline over your Obsidian vault. Ingests your markdown notes into pgvector, retrieves semantically relevant chunks via Voyage AI embeddings, and answers questions grounded in your actual notes using the Claude API.
 
 ---
