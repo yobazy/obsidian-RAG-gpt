@@ -1,0 +1,14 @@
+[
+  {
+    "question": "What chunk size did I settle on, and why?",
+    "expected_keywords": ["400", "overlap", "chunk"]
+  },
+  {
+    "question": "Which embedding model does the pipeline use?",
+    "expected_keywords": ["voyage"]
+  },
+  {
+    "question": "What did the last eval run change about retrieval?",
+    "expected_keywords": ["retrieval", "threshold"]
+  }
+]

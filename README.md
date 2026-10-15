@@ -126,7 +126,7 @@ python eval.py
 python eval.py --retrieval-only
 ```
 
-Questions live in `eval/questions.json`. Each case lists `expected_keywords` that should appear in retrieved context and/or the generated answer.
+Copy `eval/questions.example.json` to `eval/questions.json` and write questions about your own notes (the real file is gitignored, since it describes what is in your vault). Each case lists `expected_keywords` that should appear in retrieved context and/or the generated answer.
 
 ---
 

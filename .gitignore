@@ -2,3 +2,7 @@
 venv/
 __pycache__/
 *.pyc
+
+# Personal eval questions (write your own from eval/questions.example.json)
+eval/questions.json
+.DS_Store
