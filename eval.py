@@ -2,16 +2,16 @@ import argparse
 import json
 import os
 import re
+import sys
 from pathlib import Path
 
-import psycopg2
-from dotenv import load_dotenv
 from rich.console import Console
 from rich.table import Table
 
-from chat import DB_CONFIG, answer, retrieve
-
-load_dotenv()
+from rag.config import add_common_args, settings_from_args
+from rag.pipeline import Timer, answer, ingest_vault, retrieve
+from rag.providers import ProviderUnavailable, make_provider
+from rag.store import MemoryStore, make_store
 
 console = Console()
 DEFAULT_QUESTIONS = Path(__file__).parent / "eval" / "questions.json"
@@ -49,7 +49,7 @@ def load_questions(path):
         return json.load(f)
 
 
-def run_eval(conn, questions, retrieval_only=False):
+def run_eval(store, provider, settings, questions, retrieval_only=False):
     results = []
 
     for i, item in enumerate(questions, start=1):
@@ -58,7 +58,9 @@ def run_eval(conn, questions, retrieval_only=False):
 
         console.print(f"\n[bold][{i}/{len(questions)}][/bold] {question}")
 
-        chunks = retrieve(conn, question)
+        timer = Timer()
+        chunks = retrieve(store, provider, question, settings.top_k, settings.threshold)
+        retrieval_ms = timer.ms()
         context_text = "\n".join(chunk["content"] for chunk in chunks)
         retrieval_hits, retrieval_misses, retrieval_score = score_keywords(
             keywords, context_text
@@ -82,8 +84,18 @@ def run_eval(conn, questions, retrieval_only=False):
         answer_score = None
         answer_hits = []
         answer_misses = []
+        answer_ms = None
+        error = None
         if not retrieval_only:
-            response = answer(question, chunks)
+            timer = Timer()
+            try:
+                response = answer(provider, question, chunks)
+            except ProviderUnavailable as e:
+                # Score it as a miss and keep going; one bad call shouldn't sink the run.
+                console.print(f"  [red]Answer failed: {e}[/red]")
+                response = ""
+                error = str(e)
+            answer_ms = timer.ms()
             answer_hits, answer_misses, answer_score = score_keywords(
                 keywords, response
             )
@@ -91,6 +103,7 @@ def run_eval(conn, questions, retrieval_only=False):
                 f"  Answer:    [cyan]{answer_score:.0%}[/cyan] "
                 f"({len(answer_hits)}/{len(keywords)} keywords)"
             )
+            console.print(f"  [dim]Latency: retrieval {retrieval_ms} ms, answer {answer_ms} ms[/dim]")
             if answer_misses:
                 console.print(f"  [dim]Missing in answer: {', '.join(answer_misses)}[/dim]")
 
@@ -101,6 +114,10 @@ def run_eval(conn, questions, retrieval_only=False):
             "retrieval_misses": retrieval_misses,
             "answer_misses": answer_misses,
             "chunk_count": len(chunks),
+            "sources": [os.path.basename(chunk["file"]) for chunk in chunks],
+            "retrieval_ms": retrieval_ms,
+            "answer_ms": answer_ms,
+            "error": error,
         })
 
     return results
@@ -140,10 +157,19 @@ def print_summary(results, retrieval_only=False):
             f"[bold]Average answer:[/bold]    {avg_answer:.0%} "
             f"({sum(1 for r in results if r['answer_score'] == 1.0)}/{len(results)} perfect)"
         )
+    console.print(f"[bold]Median retrieval latency:[/bold] {median(r['retrieval_ms'] for r in results)} ms")
+    if avg_answer is not None:
+        console.print(f"[bold]Median answer latency:[/bold]    {median(r['answer_ms'] for r in results)} ms")
+
+
+def median(values):
+    values = sorted(values)
+    mid = len(values) // 2
+    return values[mid] if len(values) % 2 else round((values[mid - 1] + values[mid]) / 2)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run RAG eval against hand-written Q&A pairs")
+    parser = add_common_args(argparse.ArgumentParser(description="Run RAG eval against hand-written Q&A pairs"))
     parser.add_argument(
         "--questions",
         type=Path,
@@ -153,23 +179,45 @@ def main():
     parser.add_argument(
         "--retrieval-only",
         action="store_true",
-        help="Score retrieval only (skip Claude API calls)",
+        help="Score retrieval only (skip LLM calls)",
     )
+    parser.add_argument(
+        "--memory",
+        action="store_true",
+        help="Ingest the vault into an in-memory index first instead of using Postgres "
+             "(handy for the small fixture vault)",
+    )
+    parser.add_argument("--json-out", type=Path, help="Also write per-question results as JSON")
     args = parser.parse_args()
+    settings = settings_from_args(args)
 
     questions = load_questions(args.questions)
     console.print(
-        f"\n[bold green]Eval harness[/bold green] — {len(questions)} questions"
+        f"\n[bold green]Eval harness[/bold green] — {len(questions)} questions, "
+        f"{settings.provider} provider"
     )
     if args.retrieval_only:
         console.print("[dim]Retrieval-only mode (no LLM calls)[/dim]")
 
-    conn = psycopg2.connect(**DB_CONFIG)
+    provider = make_provider(settings)
     try:
-        results = run_eval(conn, questions, retrieval_only=args.retrieval_only)
-        print_summary(results, retrieval_only=args.retrieval_only)
-    finally:
-        conn.close()
+        if args.memory:
+            if not settings.vault_path:
+                sys.exit("--memory needs VAULT_PATH or --vault")
+            store = MemoryStore(settings)
+            timer = Timer()
+            ingest_vault(store, provider, settings.vault_root, log=lambda *_: None)
+            console.print(f"[dim]Indexed {store.stats()['chunks']} chunks in {timer.ms()} ms[/dim]")
+        else:
+            store = make_store(settings)
+            store.setup()
+        results = run_eval(store, provider, settings, questions, retrieval_only=args.retrieval_only)
+    except ProviderUnavailable as e:
+        sys.exit(f"❌ {e}")
+    print_summary(results, retrieval_only=args.retrieval_only)
+    if args.json_out:
+        args.json_out.write_text(json.dumps({"provider": settings.provider, "results": results}, indent=2))
+    store.close()
 
 
 if __name__ == "__main__":

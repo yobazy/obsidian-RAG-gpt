@@ -1,0 +1,16 @@
+# Postgres + pgvector for the index.
+# Start: docker compose up -d   (set DB_PORT in .env to move it off 5432)
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: ${DB_USER:-rag}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-rag}
+      POSTGRES_DB: ${DB_NAME:-obsidian_rag}
+    ports:
+      - "127.0.0.1:${DB_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:
