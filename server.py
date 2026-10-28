@@ -113,7 +113,7 @@ class App:
 
     def source(self, chunk, n) -> dict:
         rel = self.rel(chunk["file"]) or Path(chunk["file"]).name
-        text = chunk["content"]
+        text = snippet_text(chunk["content"], note_name(rel))
         snippet = text if len(text) <= SNIPPET_CHARS else text[:SNIPPET_CHARS].rsplit(" ", 1)[0] + "…"
         return {
             "n": n,
@@ -201,6 +201,15 @@ class App:
 
     def ingest_in_background(self):
         threading.Thread(target=self.ingest, daemon=True).start()
+
+
+def snippet_text(content: str, title: str) -> str:
+    """Drop the "Tags: ..." line and the repeated note title from a chunk's start."""
+    if content.startswith("Tags: ") and f" {title}" in content:
+        content = content.split(f" {title}", 1)[1].lstrip()
+    elif content.startswith(title + " "):
+        content = content[len(title):].lstrip()
+    return content
 
 
 class Handler(BaseHTTPRequestHandler):

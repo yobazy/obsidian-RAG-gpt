@@ -80,6 +80,13 @@ class ServerTest(unittest.TestCase):
         self.assertIn({"name": "Weekend Loaf", "path": "Kitchen/Weekend Loaf.md"}, top["links"])
         self.assertIn({"name": "Weekend Loaf", "path": "Kitchen/Weekend Loaf.md"}, top["backlinks"])
 
+    def test_snippet_skips_tags_and_title(self):
+        from server import snippet_text
+
+        self.assertEqual(snippet_text("Tags: baking, recipe Weekend Loaf The recipe", "Weekend Loaf"), "The recipe")
+        self.assertEqual(snippet_text("Garden Log Tomatoes Planted", "Garden Log"), "Tomatoes Planted")
+        self.assertEqual(snippet_text("Mid-note text", "Garden Log"), "Mid-note text")
+
     def test_ask_needs_a_question(self):
         code, body = http_error(lambda: post(self.base, "/ask", {"question": "  "}))
         self.assertEqual(code, 400)

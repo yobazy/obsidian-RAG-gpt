@@ -11,3 +11,4 @@ eval/questions.json
 web/node_modules/
 web/dist/
 scratch/
+web/*.tsbuildinfo

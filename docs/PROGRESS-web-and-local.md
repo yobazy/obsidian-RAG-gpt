@@ -60,6 +60,32 @@ Tests: `python3 -m unittest discover -s tests -t .` (fake provider + memory stor
 
 Threshold check with nomic on the fixture vault (`scratch/threshold.py`, not committed): on-topic top hits scored 0.63 to 0.83, off-topic questions topped out at 0.42 to 0.52. Local default stays 0.5.
 
+## Stage 3: frontend (done)
+
+`web/`, Vite + React 19 + TypeScript. No UI library; one stylesheet.
+
+- Ask box (Enter sends, Shift+Enter for a new line, Stop while streaming), streamed answer, citations `[1]` become small buttons that highlight and scroll to the source card.
+- Source cards: number, match score (or "Linked note" for wikilink expansion), title and section, path, snippet, "Links to" and "Linked from" (clickable), Preview and Open in Obsidian (`obsidian://open?vault=baz-vault&file=...`).
+- Note preview drawer: tags, rendered body with clickable wikilinks, links and backlinks, Open in Obsidian.
+- Header status: provider and model, index size, last ingest, backend health (ready, model asleep, pc unreachable). A notice shows while qwen3 loads; errors show inline with the server's message.
+- Follow-up questions send the last 3 exchanges as history.
+- Look: near-black warm background, Newsreader serif for questions, answers and titles, Inter for UI text, one amber accent. No gradients, sentence case labels. Fonts are bundled through npm (`@fontsource-variable/*`), so nothing loads from a CDN.
+- Markdown is rendered to React nodes by a small renderer (`web/src/Markdown.tsx`), never via innerHTML.
+
+Screenshots (fixture vault, local provider, real qwen3 answers), taken with `node web/scripts/screenshots.mjs`:
+
+The brief asked for `/data/tmp/overnight-2026-10-28/rag/`, but this session could only write inside the repo, so they are in the gitignored `scratch/screenshots/` folder:
+
+- `/data/repos/obsidian-RAG-gpt/scratch/screenshots/desktop-1-empty.png`
+- `/data/repos/obsidian-RAG-gpt/scratch/screenshots/desktop-2-answer.png`
+- `/data/repos/obsidian-RAG-gpt/scratch/screenshots/desktop-3-note-preview.png`
+- `/data/repos/obsidian-RAG-gpt/scratch/screenshots/phone-1-empty.png`
+- `/data/repos/obsidian-RAG-gpt/scratch/screenshots/phone-2-answer.png`
+- `/data/repos/obsidian-RAG-gpt/scratch/screenshots/phone-2b-sources.png`
+- `/data/repos/obsidian-RAG-gpt/scratch/screenshots/phone-3-note-preview.png`
+
+A copy of the desktop answer is committed as `docs/web-screenshot.png` for the README.
+
 ## Needs Bazil
 
 (filled in at the end)
