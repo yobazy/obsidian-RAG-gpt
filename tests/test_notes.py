@@ -43,6 +43,13 @@ class ChunkTest(unittest.TestCase):
         self.assertEqual(chunks[1].content.split()[0], "w30")
         self.assertEqual(chunks[-1].content.split()[-1], "w99")
 
+    def test_frontmatter_tags_kept_other_properties_dropped(self):
+        text = (FIXTURE_VAULT / "Kitchen" / "Weekend Loaf.md").read_text()
+        first = chunk_note(text)[0]
+        self.assertTrue(first.content.startswith("Tags: baking, recipe Weekend Loaf"))
+        self.assertNotIn("status", first.content)
+        self.assertEqual(first.heading, "Weekend Loaf")
+
     def test_short_text_gives_one_chunk(self):
         self.assertEqual(len(chunk_note("just a few words here")), 1)
 

@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
-from .notes import chunk_note, clean_markdown, extract_links, file_hash, read_note
+from .notes import chunk_note, clean_markdown, embed_text, extract_links, file_hash, read_note
 
 MIN_NOTE_CHARS = 50
 
@@ -14,7 +14,8 @@ SYSTEM_PROMPT = """You are a personal knowledge assistant with access to the use
 Answer questions based on the provided context from their notes.
 Be conversational and specific — reference actual content from the notes.
 If the context doesn't contain enough information to answer, say so honestly.
-Never make up information that isn't in the notes."""
+Never make up information that isn't in the notes.
+When you use a numbered passage from the context, cite it inline like [1]."""
 
 
 def in_dot_folder(path, root) -> bool:
@@ -37,7 +38,7 @@ def ingest_file(store, provider, file_path) -> int:
     raw = read_note(file_path)
     links = extract_links(raw)
 
-    if len(clean_markdown(raw)) < MIN_NOTE_CHARS:
+    if len(clean_markdown(embed_text(raw))) < MIN_NOTE_CHARS:
         if store.file_hash(path) is not None:
             store.delete_file(path)  # the note was emptied since last time
         return 0

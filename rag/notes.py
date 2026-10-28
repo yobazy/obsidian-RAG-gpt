@@ -92,19 +92,32 @@ def _words_with_headings(text: str):
             yield word, heading
 
 
+def embed_text(text: str) -> str:
+    """The part of a note worth embedding: the body, with frontmatter tags
+    kept as one plain line and other properties dropped."""
+    meta, body = parse_frontmatter(text)
+    tags = meta.get("tags")
+    if isinstance(tags, str):
+        tags = [tags]
+    if tags:
+        body = "Tags: " + ", ".join(str(t).lstrip("#") for t in tags) + "\n" + body
+    return body
+
+
 def chunk_note(text: str, chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP) -> list[Chunk]:
     """Overlapping word windows over the cleaned note.
 
-    Each chunk carries the heading in effect where it starts, so answers can
-    cite a section and not only a file.
+    Each chunk carries the heading in effect where it starts (or, for the
+    opening chunk, the first heading inside it), so answers can cite a
+    section and not only a file.
     """
-    pairs = list(_words_with_headings(text))
+    pairs = list(_words_with_headings(embed_text(text)))
     chunks = []
     start = 0
     while start < len(pairs):
         end = min(start + chunk_size, len(pairs))
         window = pairs[start:end]
-        heading = window[0][1]
+        heading = window[0][1] or next((h for _, h in window if h), None)
         chunks.append(Chunk(len(chunks), " ".join(w for w, _ in window), heading))
         if end == len(pairs):
             break

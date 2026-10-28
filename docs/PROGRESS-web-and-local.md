@@ -47,6 +47,19 @@ Smaller changes made along the way:
 
 Tests: `python3 -m unittest discover -s tests -t .` (fake provider + memory store), and `python3 -m tests.live` for the real Ollama on pc.
 
+## Stage 2: API (done)
+
+`server.py`, stdlib `ThreadingHTTPServer` (FastAPI could not be installed, see above). Default `http://127.0.0.1:8790`.
+
+- `POST /ask` `{"question", "history"?}` streams NDJSON: optional `status` (model is loading), `sources` (n, path, title, heading, score, via_link, snippet, obsidian_url, links, backlinks), `token`s, then `done` (first_token_ms, total_ms) or `error` (`backend_unavailable` with a readable message).
+- `GET /search?q=&k=`, `GET /notes/<path>` (frontmatter, body, links, backlinks, indexed), `GET /status` (provider, models, index size, last ingest, backend health with "model loaded" flags), `POST /ingest`.
+- `/notes` only serves `.md` files inside the vault, never dot folders; `..` and absolute paths return 404. The server never writes to the vault.
+- Serves `web/dist` when built, so one process is enough in production.
+- The prompt now asks the model to cite passages as `[1]`; the UI turns those into links to source cards.
+- Tests in `tests/test_server.py` run a real server on a random port over the fixture vault, including the "Ollama is down" path.
+
+Threshold check with nomic on the fixture vault (`scratch/threshold.py`, not committed): on-topic top hits scored 0.63 to 0.83, off-topic questions topped out at 0.42 to 0.52. Local default stays 0.5.
+
 ## Needs Bazil
 
 (filled in at the end)
