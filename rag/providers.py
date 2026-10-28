@@ -46,7 +46,12 @@ class Ollama:
                 return urllib.request.urlopen(request, timeout=timeout or self.timeout)
             except urllib.error.HTTPError as e:
                 detail = e.read().decode(errors="ignore")[:300]
-                raise ProviderUnavailable(f"Ollama returned {e.code}: {detail}") from e
+                last_error = ProviderUnavailable(f"Ollama returned {e.code}: {detail}")
+                # 5xx is often transient on a shared GPU (model loading, out of memory).
+                if e.code >= 500 and attempt < retries:
+                    time.sleep(5)
+                    continue
+                raise last_error from e
             except (urllib.error.URLError, socket.timeout, ConnectionError, TimeoutError) as e:
                 last_error = e
                 if attempt < retries:
@@ -65,8 +70,8 @@ class Ollama:
             return {"reachable": False, "error": str(e)}
 
         def is_loaded(model):
-            base = model.split(":")[0]
-            return any(name == model or name.split(":")[0] == base for name in loaded)
+            full = model if ":" in model else model + ":latest"
+            return full in loaded
 
         return {
             "reachable": True,
@@ -102,11 +107,21 @@ class Ollama:
             yield from strip_think(_ollama_tokens(r))
 
 
+def _lines(response):
+    try:
+        yield from response
+    except (OSError, socket.timeout) as e:  # dropped connection or read timeout mid-answer
+        raise ProviderUnavailable(f"Ollama stopped mid-answer ({_reason(e)}).") from e
+
+
 def _ollama_tokens(response) -> Iterator[str]:
-    for line in response:
+    for line in _lines(response):
         if not line.strip():
             continue
-        event = json.loads(line)
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError as e:
+            raise ProviderUnavailable("Ollama sent a reply this app can't read.") from e
         if event.get("error"):
             raise ProviderUnavailable(f"Ollama: {event['error']}")
         text = event.get("message", {}).get("content", "")

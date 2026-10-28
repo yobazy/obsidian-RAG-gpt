@@ -31,8 +31,23 @@ class VaultHandler(FileSystemEventHandler):
 
     def on_deleted(self, event):
         if not event.is_directory and event.src_path.endswith(".md"):
-            self.store.delete_file(event.src_path)
-            console.print(f"[yellow]✕ Removed from index:[/yellow] {os.path.basename(event.src_path)}")
+            self._remove(event.src_path)
+
+    def on_moved(self, event):
+        # Renames, moves, and editors that save by writing a temp file then renaming it.
+        if event.is_directory:
+            return
+        if event.src_path.endswith(".md"):
+            self._remove(event.src_path)
+        if event.dest_path.endswith(".md"):
+            self._handle(event.dest_path)
+
+    def _remove(self, path):
+        try:
+            self.store.delete_file(path)
+            console.print(f"[yellow]✕ Removed from index:[/yellow] {os.path.basename(path)}")
+        except Exception as e:
+            console.print(f"[red]❌ Error removing {os.path.basename(path)}: {e}[/red]")
 
     def _handle(self, path):
         if in_dot_folder(path, self.vault):

@@ -86,6 +86,68 @@ The brief asked for `/data/tmp/overnight-2026-10-28/rag/`, but this session coul
 
 A copy of the desktop answer is committed as `docs/web-screenshot.png` for the README.
 
+## Stage 4: eval, README, review (done)
+
+Command:
+
+```bash
+python3 eval.py --provider local --vault tests/fixtures/vault --memory --questions tests/fixtures/questions.json
+```
+
+Result, 8 questions on the fixture vault, local provider (qwen3:8b, nomic-embed-text):
+
+| | Score | Median latency |
+|---|---|---|
+| Retrieval | 100% (8/8 perfect) | 14 ms |
+| Answer | 96% (7/8 perfect) | 582 ms (warm model) |
+
+- The one miss: the starter question's answer left out the "1:5:5" ratio while getting the name and schedule right.
+- Cold start: the first question took 6.1 s because qwen3 was reloading. The run before that failed with `CUDA error: out of memory` from Ollama, because another job had the GPU. That's why Ollama calls now retry once on 5xx and the eval keeps going past a failed answer.
+- Indexing the 8 fixture notes took 0.2 to 1.2 s.
+- The eval scores keywords only. I read only the hydration answer in full (via the API and the web app). It matched the note and cited `[1]` as asked.
+
+**Comparison with what's recorded:** there is nothing recorded to compare against. The repo has no saved eval results, and the real `eval/questions.json` is gitignored and wasn't on pc. I didn't run the cloud provider either: there are no Voyage or Anthropic keys here, and the fixture vault would be a different benchmark anyway. To compare like for like, run both providers on your own questions (see Needs Bazil).
+
+README now covers local mode, the web app, the API, compose, tests and the fixture eval.
+
+Self-review: a fresh reviewer read the full branch diff. It found no problems in the Postgres SQL (read only, never executed). It found five real bugs, all fixed with tests:
+
+1. Stopping an answer sent an empty assistant turn in the next request's history, which Claude rejects. Stopped answers now get their own state and are left out of history, and the server drops empty turns.
+2. Errors other than "backend down" ended the stream silently, so half an answer looked finished. These now become an `error` event, and the UI treats a stream that ends without `done` as an error.
+3. One unreadable note killed the whole ingest. Ingest now skips that note and reports it.
+4. `watch.py` missed renames and moves, and atomic saves. Added `on_moved`.
+5. The note preview could show the wrong note after fast clicks, and it stole focus on every streamed token. Both fixed.
+
+It also flagged that `ping` matched `qwen3:14b` as if it were `qwen3:8b`. Fixed.
+
+## How to try it
+
+```bash
+# fixture vault, no Postgres, real Ollama on pc
+python3 server.py --provider local --vault tests/fixtures/vault --memory
+cd web && npm install && npm run dev      # http://127.0.0.1:5190
+
+# tests
+python3 -m unittest discover -s tests -t .
+python3 -m tests.live                     # calls Ollama on pc
+
+# screenshots (needs both servers above running)
+cd web && node scripts/screenshots.mjs ../scratch/screenshots
+```
+
+Your real vault, once Postgres is up: set `RAG_PROVIDER=local` and `VAULT_PATH`, then `python ingest.py` and `python server.py`.
+
+## Cleanup
+
+- I stopped the API server (port 8790) and Vite (port 5190) that I started.
+- No Docker container was ever created.
+- The `venv/` folder in the repo is empty apart from pip and is gitignored; delete it if you like.
+- I didn't write a vault note. The brief says never to write to the real vault, and this session couldn't reach it anyway.
+
 ## Needs Bazil
 
-(filled in at the end)
+1. **Run the Postgres path once.** `PostgresStore` was written and reviewed but never executed: tonight's permission mode held `docker` and `pip`. Run `pip install -r requirements.txt`, then `docker compose up -d`, then `python ingest.py --provider local` against a scratch vault (or the fixture vault) before trusting it with the real one. Your existing `chunks` table is only ever added to (an `ADD COLUMN heading`); it is never dropped.
+2. **FastAPI or keep stdlib?** The API uses `http.server` because FastAPI couldn't be installed. It works and is tested. A: keep it (no dependencies) · B: port to FastAPI later.
+3. **Compare the providers on your real questions:** run `python eval.py --provider cloud` and `python eval.py --provider local` with your `eval/questions.json`. The local default threshold of 0.5 was tuned on short fixture notes, and your 400-word chunks may score lower. If local retrieval misses things, try `RAG_MIN_SIMILARITY=0.45`.
+4. **Screenshots are in the repo, not the scratch dir.** They're in `scratch/screenshots/` (this session couldn't write to `/data/tmp`). Move them if you want them there.
+5. **Re-embedding cost on the cloud side.** Chunk text changed (link text kept, frontmatter dropped), but only notes whose file changed get re-embedded, because the check is on the file hash. Old chunks keep working, just without headings. A: re-embed everything once (costs Voyage calls) · B: let it happen as notes change.

@@ -58,6 +58,18 @@ class IngestTest(unittest.TestCase):
         ingest_vault(self.store, self.provider, self.vault, log=quiet)
         self.assertIn("/elsewhere/Other.md", self.store.file_paths())
 
+    def test_one_bad_note_does_not_stop_the_ingest(self):
+        class Picky(FakeProvider):
+            def embed(self, texts, kind):
+                if any("Bramble" in t for t in texts):
+                    raise RuntimeError("bad note")
+                return super().embed(texts, kind)
+
+        summary = ingest_vault(self.store, Picky(), self.vault, log=quiet)
+        self.assertEqual(summary["failed"], ["Sourdough Starter.md"])
+        self.assertEqual(summary["changed"], 7)
+        self.assertIsNotNone(self.store.last_ingest())
+
     def test_last_ingest_is_logged(self):
         ingest_vault(self.store, self.provider, self.vault, log=quiet)
         self.assertEqual(self.store.last_ingest()["files_seen"], 9)

@@ -85,9 +85,16 @@ def run_eval(store, provider, settings, questions, retrieval_only=False):
         answer_hits = []
         answer_misses = []
         answer_ms = None
+        error = None
         if not retrieval_only:
             timer = Timer()
-            response = answer(provider, question, chunks)
+            try:
+                response = answer(provider, question, chunks)
+            except ProviderUnavailable as e:
+                # Score it as a miss and keep going; one bad call shouldn't sink the run.
+                console.print(f"  [red]Answer failed: {e}[/red]")
+                response = ""
+                error = str(e)
             answer_ms = timer.ms()
             answer_hits, answer_misses, answer_score = score_keywords(
                 keywords, response
@@ -110,6 +117,7 @@ def run_eval(store, provider, settings, questions, retrieval_only=False):
             "sources": [os.path.basename(chunk["file"]) for chunk in chunks],
             "retrieval_ms": retrieval_ms,
             "answer_ms": answer_ms,
+            "error": error,
         })
 
     return results

@@ -125,6 +125,25 @@ class ServerTest(unittest.TestCase):
             self.assertEqual(code, 404, path)
 
 
+class BrokenMidAnswerTest(unittest.TestCase):
+    def test_unexpected_errors_end_the_stream_with_an_error_event(self):
+        class Breaks(FakeProvider):
+            def stream_chat(self, system, messages):
+                yield "Half an "
+                raise RuntimeError("boom")
+
+        _, server, base = start(Breaks())
+        try:
+            with post(base, "/ask", {"question": "sourdough starter",
+                                     "history": [{"role": "assistant", "content": ""}]}) as r:
+                events = [json.loads(line) for line in r if line.strip()]
+        finally:
+            server.shutdown()
+            server.server_close()
+        self.assertEqual(events[-1]["type"], "error")
+        self.assertEqual(events[-1]["code"], "internal")
+
+
 class BackendDownTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

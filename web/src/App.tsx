@@ -7,7 +7,7 @@ type Exchange = {
   question: string;
   answer: string;
   sources: Source[];
-  state: "searching" | "answering" | "done" | "error";
+  state: "searching" | "answering" | "done" | "stopped" | "error";
   notice?: string;
   error?: string;
   timings?: { retrieval_ms?: number; first_token_ms?: number | null; total_ms?: number };
@@ -38,6 +38,7 @@ export default function App() {
     return () => clearInterval(timer);
   }, [refreshStatus]);
 
+  const closePreview = useCallback(() => setPreview(null), []);
   const busy = exchanges.some((e) => e.state === "searching" || e.state === "answering");
 
   const submit = async (question: string) => {
@@ -71,9 +72,15 @@ export default function App() {
         },
         controller.signal,
       );
-      update((e) => (e.state === "done" || e.state === "error" ? {} : { state: "done" }));
+      // The stream closed without a done or error event, so the answer is incomplete.
+      update((e) =>
+        e.state === "done" || e.state === "error"
+          ? {}
+          : { state: "error", error: "The answer stopped early. Try asking again.", notice: undefined },
+      );
     } catch (err) {
-      if (controller.signal.aborted) update(() => ({ state: "done", notice: undefined }));
+      // Stopped answers stay on screen but are left out of the history sent with follow-ups.
+      if (controller.signal.aborted) update(() => ({ state: "stopped", notice: undefined }));
       else update(() => ({ state: "error", error: (err as Error).message, notice: undefined }));
     } finally {
       refreshStatus();
@@ -98,7 +105,7 @@ export default function App() {
         <AskBox busy={busy} onSubmit={submit} onStop={() => abort.current?.abort()} autoFocus={exchanges.length === 0} />
       </main>
 
-      {preview ? <NotePreview path={preview} onOpen={setPreview} onClose={() => setPreview(null)} /> : null}
+      {preview ? <NotePreview path={preview} onOpen={setPreview} onClose={closePreview} /> : null}
     </div>
   );
 }
@@ -239,6 +246,7 @@ function ExchangeView({ exchange, onOpen }: { exchange: Exchange; onOpen: (path:
             <p>{exchange.error}</p>
           </div>
         ) : null}
+        {exchange.state === "stopped" ? <p className="timing">Stopped</p> : null}
         {exchange.state === "done" && t?.total_ms ? (
           <p className="timing">
             Found sources in {fmtMs(t.retrieval_ms)}, first words after {fmtMs(t.first_token_ms ?? undefined)}, done in {fmtMs(t.total_ms)}
@@ -331,15 +339,26 @@ function NotePreview({ path, onOpen, onClose }: { path: string; onOpen: (p: stri
   const panel = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    let live = true; // ignore a slow reply for a note we've already moved past
     setNote(null);
     setError(null);
-    getNote(path).then(setNote, (e: Error) => setError(e.message));
+    getNote(path).then(
+      (n) => live && setNote(n),
+      (e: Error) => live && setError(e.message),
+    );
+    panel.current?.scrollTo(0, 0);
+    return () => {
+      live = false;
+    };
   }, [path]);
+
+  useEffect(() => {
+    panel.current?.focus();
+  }, []);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
     window.addEventListener("keydown", onKey);
-    panel.current?.focus();
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 

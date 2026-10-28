@@ -181,6 +181,8 @@ class App:
         except ProviderUnavailable as e:
             self._ping = (0.0, None)
             yield {"type": "error", "code": "backend_unavailable", "message": str(e)}
+        except Exception as e:  # headers are sent already, so report it in the stream
+            yield {"type": "error", "code": "internal", "message": f"Something broke on the server: {e}"}
 
     def ingest(self):
         if not self.root:
@@ -193,7 +195,7 @@ class App:
         try:
             ingest_vault(self.store, self.provider, self.root, log=lambda *_: None)
             self._names = None
-        except ProviderUnavailable as e:
+        except Exception as e:
             self.index_error = str(e)
         finally:
             self.indexing = False
@@ -270,7 +272,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(HTTPStatus.BAD_REQUEST, "Ask a question first.")
         history = [m for m in body.get("history") or []
                    if isinstance(m, dict) and m.get("role") in ("user", "assistant")
-                   and isinstance(m.get("content"), str)]
+                   and isinstance(m.get("content"), str) and m["content"].strip()]
 
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")

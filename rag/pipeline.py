@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Iterator
 
 from .notes import chunk_note, clean_markdown, embed_text, extract_links, file_hash, read_note
+from .providers import ProviderUnavailable
 
 MIN_NOTE_CHARS = 50
 
@@ -62,8 +63,16 @@ def ingest_vault(store, provider, vault_path, log=print) -> dict:
 
     changed = 0
     total = 0
+    failed = []
     for i, f in enumerate(files):
-        count = ingest_file(store, provider, f)
+        try:
+            count = ingest_file(store, provider, f)
+        except ProviderUnavailable:
+            raise  # the backend is down; every other file would fail too
+        except Exception as e:  # e.g. a note deleted mid-run; skip it, keep going
+            failed.append(f.name)
+            log(f"  ⚠️ Skipped {f.name}: {e}")
+            continue
         if count:
             changed += 1
             log(f"  [{i+1}/{len(files)}] {f.name} → {count} chunks")
@@ -78,7 +87,8 @@ def ingest_vault(store, provider, vault_path, log=print) -> dict:
         store.delete_file(p)
 
     store.log_ingest(started, len(files), changed, total, len(removed))
-    summary = {"files": len(files), "changed": changed, "chunks": total, "removed": len(removed)}
+    summary = {"files": len(files), "changed": changed, "chunks": total, "removed": len(removed),
+               "failed": failed}
     log(f"\n✅ Done. {total} chunks ingested, {len(removed)} removed notes cleared.")
     return summary
 
