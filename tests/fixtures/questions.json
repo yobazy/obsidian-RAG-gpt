@@ -1,0 +1,34 @@
+[
+  {
+    "question": "What hydration did I settle on for the weekend loaf, and why?",
+    "expected_keywords": ["75 percent", "flat"]
+  },
+  {
+    "question": "How often do I feed my sourdough starter and what is it called?",
+    "expected_keywords": ["Bramble", "once a week", "1:5:5"]
+  },
+  {
+    "question": "What does a grey liquid on top of the starter mean?",
+    "expected_keywords": ["hooch", "hungry"]
+  },
+  {
+    "question": "Why did the Lighthouse App use IndexedDB?",
+    "expected_keywords": ["localStorage", "5 MB"]
+  },
+  {
+    "question": "What is the station code for the north beach tide data?",
+    "expected_keywords": ["NB04"]
+  },
+  {
+    "question": "What went wrong on day two of the coast ride?",
+    "expected_keywords": ["headwind", "punctured"]
+  },
+  {
+    "question": "When did the first tomato ripen and which variety should I try next year?",
+    "expected_keywords": ["28 July", "San Marzano"]
+  },
+  {
+    "question": "Where do I buy flour and when is the members discount?",
+    "expected_keywords": ["co-op", "first Saturday"]
+  }
+]

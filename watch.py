@@ -1,28 +1,25 @@
+import argparse
 import os
+import sys
 import time
-import psycopg2
-from dotenv import load_dotenv
-from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler
+
 from rich.console import Console
-from ingest import ingest_file, setup_db
+from watchdog.events import FileSystemEventHandler
+from watchdog.observers import Observer
 
-load_dotenv()
-
-VAULT_PATH = os.getenv("VAULT_PATH")
-DB_CONFIG = {
-    "host": os.getenv("DB_HOST"),
-    "port": os.getenv("DB_PORT"),
-    "dbname": os.getenv("DB_NAME"),
-    "user": os.getenv("DB_USER"),
-    "password": os.getenv("DB_PASSWORD"),
-}
+from rag.config import add_common_args, settings_from_args
+from rag.pipeline import in_dot_folder, ingest_file
+from rag.providers import make_provider
+from rag.store import make_store
 
 console = Console()
 
+
 class VaultHandler(FileSystemEventHandler):
-    def __init__(self, conn):
-        self.conn = conn
+    def __init__(self, store, provider, vault):
+        self.store = store
+        self.provider = provider
+        self.vault = vault
 
     def on_modified(self, event):
         if not event.is_directory and event.src_path.endswith(".md"):
@@ -32,11 +29,18 @@ class VaultHandler(FileSystemEventHandler):
         if not event.is_directory and event.src_path.endswith(".md"):
             self._handle(event.src_path)
 
+    def on_deleted(self, event):
+        if not event.is_directory and event.src_path.endswith(".md"):
+            self.store.delete_file(event.src_path)
+            console.print(f"[yellow]✕ Removed from index:[/yellow] {os.path.basename(event.src_path)}")
+
     def _handle(self, path):
+        if in_dot_folder(path, self.vault):
+            return
         filename = os.path.basename(path)
         console.print(f"[yellow]⟳ Detected change:[/yellow] {filename}")
         try:
-            count = ingest_file(self.conn, path)
+            count = ingest_file(self.store, self.provider, path)
             if count:
                 console.print(f"[green]✅ Re-ingested:[/green] {filename} → {count} chunks")
             else:
@@ -44,16 +48,22 @@ class VaultHandler(FileSystemEventHandler):
         except Exception as e:
             console.print(f"[red]❌ Error ingesting {filename}: {e}[/red]")
 
-def main():
-    conn = psycopg2.connect(**DB_CONFIG)
-    setup_db(conn)
 
-    handler = VaultHandler(conn)
+def main():
+    args = add_common_args(argparse.ArgumentParser(description="Re-ingest notes as they change")).parse_args()
+    settings = settings_from_args(args)
+    if not settings.vault_path:
+        sys.exit("Set VAULT_PATH (or pass --vault).")
+    store = make_store(settings)
+    store.setup()
+    vault = str(settings.vault_root)
+
+    handler = VaultHandler(store, make_provider(settings), vault)
     observer = Observer()
-    observer.schedule(handler, VAULT_PATH, recursive=True)
+    observer.schedule(handler, vault, recursive=True)
     observer.start()
 
-    console.print(f"\n[bold green]👁 Watching vault:[/bold green] {VAULT_PATH}")
+    console.print(f"\n[bold green]👁 Watching vault:[/bold green] {vault} ({settings.provider} provider)")
     console.print("[dim]Edit any note to trigger re-ingestion. Ctrl+C to stop.[/dim]\n")
 
     try:
@@ -64,7 +74,8 @@ def main():
         console.print("\n[dim]Stopped watching.[/dim]")
 
     observer.join()
-    conn.close()
+    store.close()
+
 
 if __name__ == "__main__":
     main()
