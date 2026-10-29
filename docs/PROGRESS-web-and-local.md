@@ -151,3 +151,54 @@ Your real vault, once Postgres is up: set `RAG_PROVIDER=local` and `VAULT_PATH`,
 3. **Compare the providers on your real questions:** run `python eval.py --provider cloud` and `python eval.py --provider local` with your `eval/questions.json`. The local default threshold of 0.5 was tuned on short fixture notes, and your 400-word chunks may score lower. If local retrieval misses things, try `RAG_MIN_SIMILARITY=0.45`.
 4. **Screenshots are in the repo, not the scratch dir.** They're in `scratch/screenshots/` (this session couldn't write to `/data/tmp`). Move them if you want them there.
 5. **Re-embedding cost on the cloud side.** Chunk text changed (link text kept, frontmatter dropped), but only notes whose file changed get re-embedded, because the check is on the file hash. Old chunks keep working, just without headings. A: re-embed everything once (costs Voyage calls) · B: let it happen as notes change.
+
+## Review pass 2026-10-29
+
+A second unattended run read the full branch diff (`git diff origin/main...HEAD`) cold, alongside the brief. I reproduced each finding before fixing it (script: `scratch/r-rag/repro.py` in the run's scratch dir). Every fix has a test that fails on the old `server.py` and passes now. Commit `1cfcf06`.
+
+### Confirmed and fixed
+
+1. **DNS rebinding could read notes.** The server answered any `Host` header. A web page that rebinds its domain to 127.0.0.1 could read `/notes/...` from the browser. Repro: `GET /notes/Kitchen/Weekend%20Loaf.md` with `Host: attacker.example` returned 200 and the note. Fix: only `localhost`, `127.0.0.1`, `::1` and the `--host` it binds to are allowed (never `0.0.0.0`), plus anything listed in `RAG_ALLOWED_HOSTS`. Anything else gets 403.
+2. **Cross-site POSTs.** Any site could send a `text/plain` POST to `/ask` or `/ingest` without a CORS preflight (repro: 200). That spends Claude/Voyage calls in cloud mode and starts re-indexing. Fix: POSTs must be `application/json` (415 otherwise). The web app already sent JSON, and nothing calls `/ingest` from the browser.
+3. **An unreachable pc took minutes to fail.** `/ask` pinged Ollama (4 s), ignored a "down" result, and then let the embed call wait out its read timeout twice. Repro with a blackholed address and `OLLAMA_TIMEOUT=8`: 22 s. At the default 180 s that's about 6 minutes. `ollama_connect_timeout` is defined but never used. Fix: `/ask` and `/search` raise `backend_unavailable` straight away when the cached ping says pc is unreachable. Same repro now: 4.0 s. The CLIs still use the long timeout (left as is, see below).
+4. **A non-object JSON body dropped the connection.** `POST /ask` with `[]` crashed the handler (`'list' object has no attribute 'get'`), and the client got no response. It's now 400. A non-list `history` is ignored.
+5. **`/search?k=-1` was accepted.** In memory mode it returned every result but the last. In Postgres it would have sent `LIMIT -1`, which errors and drops the connection. `k` is now limited to 1..50 (400 otherwise).
+6. **Tests that passed for the wrong reason.**
+   - `test_unresolved_links_have_no_path` never touched an unresolved link (the fixture vault has none). It's renamed to what it actually checks (image embeds aren't links), and a new test checks `resolve_links` returns `path: None` for a missing note.
+   - In `test_note_paths_cannot_escape_the_vault`, the encoded case `../test_notes.py` pointed at a file that doesn't exist, so it 404'd anyway. It now uses an encoded path to `README.md`, which does exist outside the vault.
+
+README and `.env.example` now cover the host allowlist and `RAG_ALLOWED_HOSTS`.
+
+### Checked, no problem found
+
+- Notes claims that hold up: the fixture eval reproduces exactly (retrieval 100%, 8/8; answer 96%, 7/8, same miss on "1:5:5"; median answer latency 616 ms warm). Live Ollama tests pass (`python3 -m tests.live`, 768-dim embeddings, no `<think>` in output). The earlier screenshots exist at the listed paths. The web bundle loads nothing from a CDN. The Markdown renderer never makes `href`s, so no script injection from note text.
+- Vault containment for `/notes` (symlinks resolve before the check, dot folders and non-`.md` files are refused), static file serving, and the SQL in `PostgresStore`. I only read the SQL: the vector size check uses `atttypmod`, the migrations only add, and the parameters are passed safely.
+
+### Not fixed, and why
+
+- **Postgres path still not executed.** This run's permission mode also held `docker run` and `pip install` (into a scratch venv), so there was no pgvector container and no psycopg2. Needs Bazil 1 above still stands.
+- **CLIs still wait the full timeout when pc is down.** `chat.py`, `eval.py` and `ingest.py` don't ping first. Making `ollama_connect_timeout` work needs a separate connect timeout in the urllib code, which is a redesign rather than a small fix. The web app, where this matters most, is fixed.
+- **Not reproduced, so left alone:** (a) In Postgres mode the server caches the note-name map until it restarts, so a note added while it runs shows as an unresolved link in "Links to". (b) `watch.py` ignores directory moves (`is_directory`). On Linux, watchdog usually also sends per-file events, but I couldn't confirm that without watchdog installed.
+- **No login on the API.** That's by design for a localhost tool. The README now says to keep it off public networks.
+
+### Checks run
+
+- `python3 -m unittest discover -s tests -t .`: 50 tests, OK (2 live tests skipped). That's 7 more than before.
+- `python3 -m tests.live`: 4 tests, OK, against Ollama on pc.
+- `python3 eval.py --provider local --vault tests/fixtures/vault --memory --questions tests/fixtures/questions.json`: results above.
+- `cd web && npm ci && npm run build` (`tsc -b` plus the Vite build): clean.
+- Screenshots through the fixed server (`python3 server.py --provider local --vault tests/fixtures/vault --memory --port 8796`, then `node scripts/screenshots.mjs <dir> http://127.0.0.1:8796`). They confirm the Host check and the JSON-only POSTs didn't break the app:
+  - `/data/tmp/overnight-2026-10-29/scratch/r-rag/screenshots/desktop-1-empty.png`
+  - `/data/tmp/overnight-2026-10-29/scratch/r-rag/screenshots/desktop-2-answer.png`
+  - `/data/tmp/overnight-2026-10-29/scratch/r-rag/screenshots/desktop-3-note-preview.png`
+  - `/data/tmp/overnight-2026-10-29/scratch/r-rag/screenshots/phone-1-empty.png`
+  - `/data/tmp/overnight-2026-10-29/scratch/r-rag/screenshots/phone-2-answer.png`
+  - `/data/tmp/overnight-2026-10-29/scratch/r-rag/screenshots/phone-2b-sources.png`
+  - `/data/tmp/overnight-2026-10-29/scratch/r-rag/screenshots/phone-3-note-preview.png`
+- There's no Rust in this repo, so there was nothing for cargo fmt/clippy/test.
+- Cleanup: I stopped the server I started. No containers were created.
+
+### Needs Bazil (review pass)
+
+1. Run the Postgres path once (same as Needs Bazil 1 above; still the main open risk).
+2. If you open the web app by your Tailscale name, start it with `--host 0.0.0.0` and set `RAG_ALLOWED_HOSTS=pc.taila3582d.ts.net`. Otherwise it answers 403.
