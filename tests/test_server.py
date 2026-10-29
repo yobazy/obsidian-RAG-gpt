@@ -58,8 +58,8 @@ class ServerTest(unittest.TestCase):
         status, body = get(self.base, "/status")
         self.assertEqual(status, 200)
         self.assertEqual(body["provider"], "local")
-        self.assertEqual(body["index"]["notes"], 8)
-        self.assertEqual(body["last_ingest"]["files_seen"], 9)
+        self.assertEqual(body["index"]["notes"], 24)
+        self.assertEqual(body["last_ingest"]["files_seen"], 25)
         self.assertTrue(body["backend"]["reachable"])
 
     def test_ask_streams_sources_then_tokens(self):
@@ -115,7 +115,8 @@ class ServerTest(unittest.TestCase):
         self.assertTrue(body["body"].lstrip().startswith("# Weekend Loaf"))
         self.assertTrue(body["indexed"])
         self.assertEqual(body["links"], [{"name": "Sourdough Starter", "path": "Kitchen/Sourdough Starter.md"}])
-        self.assertEqual(body["backlinks"], [{"name": "Sourdough Starter", "path": "Kitchen/Sourdough Starter.md"}])
+        self.assertEqual(body["backlinks"], [{"name": "Focaccia", "path": "Kitchen/Focaccia.md"},
+                                             {"name": "Sourdough Starter", "path": "Kitchen/Sourdough Starter.md"}])
 
     def test_image_embeds_are_not_listed_as_links(self):
         _, body = get(self.base, "/notes/" + quote("Coast Path Ride.md"))
@@ -235,7 +236,7 @@ class BackendDownTest(unittest.TestCase):
     def test_status_still_works(self):
         _, body = get(self.base, "/status")
         self.assertFalse(body["backend"]["reachable"])
-        self.assertEqual(body["index"]["notes"], 8)
+        self.assertEqual(body["index"]["notes"], 24)
 
 
 class UnreachablePcFailsFastTest(unittest.TestCase):
