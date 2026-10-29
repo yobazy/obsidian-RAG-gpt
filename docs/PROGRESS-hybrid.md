@@ -105,6 +105,29 @@ Noise: Ollama embeddings aren't bit-for-bit stable between runs, so the same con
 
 Abstain stayed at 0% in every config: the passport and Kubernetes questions both score above the 0.5 local threshold. That's the threshold, not this branch. Left alone; see Needs Bazil.
 
+## Stage 3: rerank with qwen3 (done, off by default)
+
+`rag/rerank.py`, turned on with `RAG_RERANK=1` or `eval.py --rerank`.
+
+- The top 12 fused candidates (each cut to 600 characters, labelled "Note > Section") go to qwen3:8b in one call, with Ollama structured output (`format` = a JSON schema for `{"ranking": [int]}`), `think: false`, temperature 0.
+- Passages the model ranks go first; the rest keep their fused order after them, so nothing is lost. Out-of-range, repeated or non-integer numbers are ignored.
+- Any failure (timeout 60 s, bad JSON, no ranking) logs a warning and keeps the fused order, so rerank can't stop an answer.
+- Only the Ollama provider has `chat_json`. With the cloud provider, rerank is skipped silently. Sending candidates to Claude for reranking would be easy to add but costs a call per question; I didn't.
+
+Measured (retrieval only, warm qwen3, 57 questions):
+
+| | Hybrid defaults | + rerank | Vector + rerank |
+|---|---|---|---|
+| Recall | 100% | 100% | 98% |
+| @3 | 97% | 98% | 96% |
+| MRR | 0.97 | 0.98 | 0.96 |
+| Hit@1 | 95% | 96% | 95% |
+| Retrieval p50 / p90 | 15 / 18 ms | 608 / 801 ms | 578 / 796 ms |
+
+One question changed: "Who gave me the tomato seedlings?" moved Tom Okafor from rank 2 to 1. No fallbacks fired. Vector + rerank catches up with hybrid on ranking, but it can't fix the filter questions, because the right note never makes it into the vector candidates.
+
+**Decision: keep it, off by default.** One question better for about 40 times the retrieval time (and several seconds more when qwen3 is cold) isn't worth it as a default on this set. It may earn its place on a real vault with more near-duplicates; try `python eval.py --provider local --rerank` on your own questions.
+
 ## Status
 
-Stage 3 in progress.
+All three stages done. Self-review next.
