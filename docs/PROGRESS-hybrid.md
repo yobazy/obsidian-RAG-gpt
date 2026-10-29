@@ -55,6 +55,56 @@ A retrieval-only run gave MRR 0.90 and hit@1 84% before I fixed the expected sou
 
 **Cloud provider: not run.** There's no `.env`, no Voyage or Anthropic key, and the `anthropic`/`voyageai` packages aren't installed (pip is held). See Needs Bazil.
 
+## Stage 2: hybrid retrieval, filters, heading-aware chunks (done)
+
+### What changed
+
+- **Keyword search.** `store.keyword_search()`:
+  - Memory store: real BM25 (k1 1.2, b 0.75) over note name, heading and chunk text, with stopwords dropped and plurals folded. The index rebuilds lazily after a write.
+  - Postgres: a generated `tsv` column (`to_tsvector('english', note name || heading || content)`) with a GIN index, queried with an OR `to_tsquery` built only from `[a-z0-9]` words (no user syntax reaches Postgres) and ranked by `ts_rank(..., 1)` (length-normalised). That's BM25-like, not exact BM25; real BM25 in Postgres needs an extension (`pg_search`/ParadeDB), which I didn't want to add unrun. Generated column means existing rows get it with no re-embedding.
+- **Fusion.** `pipeline.fuse()`: reciprocal rank fusion, k = 60, 20 candidates from each ranker, matched on (file, chunk). `similarity` stays the cosine score (the web app's "% match"); the fused score is in `score`.
+- **Keyword-only hits are gated.** A row found only by keywords is kept if its cosine is at most 0.05 below the threshold. Without this, a stray word match could put an unrelated note in the context.
+- **Filters.** Frontmatter tags are stored per note (`tags TEXT[]` in Postgres, added with `ADD COLUMN IF NOT EXISTS`). Filters come from the question (`#tag`, `tag:x`, `in:Folder`, `in:"Two Words"`) or a `filters` argument. They apply to both rankers' primary hits; linked notes are still added. `#12` or `C#` are not tags. Folder match is on a `/Folder/` path segment, so a vault that itself sits under a folder of the same name would over-match (unlikely, noted).
+- **Heading-aware chunking** (`RAG_CHUNKING=heading`): notes over 400 words split at every heading; sections under 25 words merge into the next; long sections still get 400/50 windows. Each chunk's embedded and keyword-indexed text starts with "Note > Section". Notes that fit in one chunk stay whole (see measurements). The stored hash gets a `:heading` suffix, so switching modes re-indexes each note once instead of mixing chunk styles.
+- **Backlink expansion** (`RAG_BACKLINKS=1`): adds one chunk from each note that links to a top hit (the chunk that mentions it, else the first), up to 5. They're labelled for the model as "a note that links to one of the passages above" and in the web app as "Links here".
+- Tag updates ride along with link updates when a note's hash hasn't changed, so tags appear on old rows without re-embedding.
+- `eval.py`: `--retrieval`, `--chunking`, `--backlinks/--no-backlinks`, `--rerank/--no-rerank`, `--top-k`; questions' `filters` are passed through; `--json-out` records the config.
+- Six more questions (`long-note`, 57 total) over two new long notes (a 7-day trip diary, a 6-week course), because none of the earlier notes were over 400 words, so the eval couldn't see what heading chunking is for.
+
+### Measurements
+
+Fixture vault, local provider, 57 questions. Retrieval-only runs except where it says answers.
+
+| Config | Recall | @3 | MRR | Hit@1 | Long-note MRR | Backlink recall | Filter recall | Chunks/q |
+|---|---|---|---|---|---|---|---|---|
+| Stage 1 code (vector, window, no filters), full run | 95% | 92% | 0.90 | 85% | 0.75 | 88% | 67% | 7.0 |
+| vector, window (filters now applied) | 95% | 94% | 0.92 | 87% | 0.75 | 88% | 67% | 6.7 |
+| vector, heading | 97% | 95% | 0.95 | 91% | 1.00 | 88% | 67% | 6.4 |
+| hybrid, window | 98% | 96% | 0.95 | 93% | 0.83 | 95% | 100% | 6.6 |
+| hybrid, heading | 100% | 97% | 0.97 | 95% | 1.00 | 95% | 100% | 6.5 |
+| **hybrid, heading, backlinks (new default)** | **100%** | **97%** | **0.97** | **95%** | **1.00** | **100%** | **100%** | 7.2 |
+
+Full runs with answers (qwen3:8b, warm):
+
+| | Stage 1 code | New defaults |
+|---|---|---|
+| Source recall / MRR / hit@1 | 95% / 0.90 / 85% | 100% / 0.97 / 95% |
+| All expected sources found | 93% | 100% |
+| Answer keywords | 90% | 97% |
+| Median retrieval latency | 15 ms | 14 ms |
+| Median answer latency | 741 ms | 698 ms |
+
+Things I tried and dropped:
+
+- **Splitting every note at headings**, short ones included. Long-note MRR went to 1.00, but backlink MRR fell from 0.70 to 0.45 and multi-hop @3 from 94% to 72%: three pieces of one short note filled the top five and pushed other notes out. Short notes now stay whole.
+- **Putting the note title in front of whole short notes** too. Backlink MRR 0.50 against 0.70 without it. The title is only added to section chunks of long notes.
+- **Fusion constants.** In-process sweep (`scratch/.../sweep.py`): RRF k 10 vs 60 and candidate depth 10/20/40 changed nothing on this vault. The keyword gate margin: 0 lost a filter question (recall 98%), 0.05 was best (hit@1 92.7%), 0.1 to 1.0 were one question worse (90.9%). Took 0.05. That's a one-question difference, so treat it as "a small margin", not a tuned value.
+- **First stemmer** (stripping -ed/-ing/-es) turned "tides" into "tid" and left "tide" alone, so they never matched. A test caught it; it now only folds plurals.
+
+Noise: Ollama embeddings aren't bit-for-bit stable between runs, so the same config can move by one question (fact MRR 0.98 in one run, 1.00 in another).
+
+Abstain stayed at 0% in every config: the passport and Kubernetes questions both score above the 0.5 local threshold. That's the threshold, not this branch. Left alone; see Needs Bazil.
+
 ## Status
 
-Stage 2 in progress.
+Stage 3 in progress.

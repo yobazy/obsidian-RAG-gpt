@@ -22,14 +22,17 @@ Obsidian Vault (.md files)
         ↓
 Ingestion (ingest.py)          Auto re-ingestion (watch.py)
   — walks vault, chunks notes    — watches vault for saves
+    (long notes split at headings)
   — embeds via Voyage AI         — re-ingests changed notes on the fly
-  — stores chunks + embeddings in pgvector
+  — stores chunks + embeddings + tags in pgvector, with a full-text index
         ↓
 pgvector (Postgres via Docker)
         ↓
 Retrieval + Generation (rag/pipeline.py)
-  — semantic search over embeddings (with similarity threshold)
-  — expands context via Obsidian [[backlinks]]
+  — hybrid search: vectors (with similarity threshold) + keywords,
+    merged with reciprocal rank fusion; optional #tag / in:Folder filters
+  — expands context via [[links]] and notes that link back
+  — optional rerank with the local qwen3 (off by default)
   — Claude or qwen3 answers grounded in retrieved context
         ↓
 CLI chat (chat.py)  ·  HTTP API (server.py)  →  web app (web/)
@@ -161,7 +164,20 @@ python eval.py --provider local --vault tests/fixtures/vault --memory \
 
 Each question also reports retrieval and answer latency; `--json-out results.json` saves the per-question results.
 
-Copy `eval/questions.example.json` to `eval/questions.json` and write questions about your own notes (the real file is gitignored, since it describes what is in your vault). Each case lists `expected_keywords` that should appear in retrieved context and/or the generated answer.
+Copy `eval/questions.example.json` to `eval/questions.json` and write questions about your own notes (the real file is gitignored, since it describes what is in your vault). Each case lists `expected_keywords` that should appear in retrieved context and/or the generated answer. Add `expected_sources` (note names) to also get source recall, recall in the first three notes, MRR and hit@1; `type` groups the results; `filters` (`{"tags": [...], "folder": "..."}`) is passed to retrieval. A `type` of `abstain` with no sources checks that nothing comes back.
+
+`--retrieval`, `--chunking`, `--backlinks/--no-backlinks`, `--rerank/--no-rerank` and `--top-k` override the settings below for one run, so you can compare them on your own questions. The fixture set (`tests/fixtures/questions.json`, 57 questions) and the measurements behind the defaults are in `docs/PROGRESS-hybrid.md`.
+
+### Retrieval settings
+
+| Variable | Default | What it does |
+|---|---|---|
+| `RAG_RETRIEVAL` | `hybrid` | `hybrid`: vector and keyword rankings merged with reciprocal rank fusion. `vector`: embeddings only. |
+| `RAG_CHUNKING` | `heading` | `heading`: notes longer than one chunk are split at headings, each chunk tagged with its note and section. `window`: 400-word windows over the whole note. Switching re-indexes each note once on the next ingest. |
+| `RAG_BACKLINKS` | `1` | Also add one chunk from each note that links to the top hits. |
+| `RAG_RERANK` | `0` | Let the local chat model reorder the candidates (local provider only). |
+
+Filters go straight in the question: `#recipe how long in the fridge?`, `tag:book`, `in:Kitchen` or `in:"Side Projects"`. Tags match any of the given tags and include nested tags (`#book` matches `#book/fiction`). Filters limit the main hits; linked notes are still added.
 
 ---
 
@@ -197,7 +213,10 @@ The tests run against `tests/fixtures/vault`, a small made-up vault with frontma
 
 - **Hash-based change detection** — only re-ingests notes that have changed
 - **Auto re-ingestion** — `watch.py` keeps the index up to date as you edit notes in Obsidian
-- **Backlink-aware retrieval** — expands retrieved context to include notes linked via `[[wikilinks]]`
+- **Hybrid search** — keyword (Postgres full-text) and vector rankings merged with reciprocal rank fusion, so exact names and codes are found as well as paraphrases
+- **Tag and folder filters** — `#tag`, `tag:x` or `in:Folder` in the question
+- **Heading-aware chunks** — long notes are split at headings, so a section can be found on its own
+- **Link-aware retrieval** — expands retrieved context to include notes linked via `[[wikilinks]]` and notes that link back
 - **Similarity threshold** — filters out low-confidence chunks before they reach the LLM
 - **Source attribution** — every answer shows which notes and sections it drew from, with similarity scores
 - **Local or cloud** — Ollama on your own hardware, or Voyage + Claude, each with its own index
@@ -215,6 +234,7 @@ The tests run against `tests/fixtures/vault`, a small made-up vault with frontma
 - [x] Eval harness with scored Q&A pairs
 - [x] React frontend
 - [x] Local provider (Ollama)
+- [x] Hybrid retrieval, filters, heading-aware chunks
 
 ---
 

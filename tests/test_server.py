@@ -58,8 +58,8 @@ class ServerTest(unittest.TestCase):
         status, body = get(self.base, "/status")
         self.assertEqual(status, 200)
         self.assertEqual(body["provider"], "local")
-        self.assertEqual(body["index"]["notes"], 24)
-        self.assertEqual(body["last_ingest"]["files_seen"], 25)
+        self.assertEqual(body["index"]["notes"], 26)
+        self.assertEqual(body["last_ingest"]["files_seen"], 27)
         self.assertTrue(body["backend"]["reachable"])
 
     def test_ask_streams_sources_then_tokens(self):
@@ -236,7 +236,7 @@ class BackendDownTest(unittest.TestCase):
     def test_status_still_works(self):
         _, body = get(self.base, "/status")
         self.assertFalse(body["backend"]["reachable"])
-        self.assertEqual(body["index"]["notes"], 24)
+        self.assertEqual(body["index"]["notes"], 26)
 
 
 class UnreachablePcFailsFastTest(unittest.TestCase):

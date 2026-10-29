@@ -82,7 +82,8 @@ def run_eval(store, provider, settings, questions, retrieval_only=False):
         console.print(f"\n[bold][{i}/{len(questions)}][/bold] {question}")
 
         timer = Timer()
-        chunks = retrieve(store, provider, question, settings.top_k, settings.threshold)
+        chunks = retrieve(store, provider, question, settings.top_k, settings.threshold,
+                          filters=item.get("filters"), **settings.retrieval_options())
         retrieval_ms = timer.ms()
         context_text = "\n".join(chunk["content"] for chunk in chunks)
         retrieval_hits, retrieval_misses, retrieval_score = score_keywords(
@@ -275,14 +276,25 @@ def main():
              "(handy for the small fixture vault)",
     )
     parser.add_argument("--json-out", type=Path, help="Also write per-question results as JSON")
+    parser.add_argument("--retrieval", choices=("hybrid", "vector"), help="Overrides RAG_RETRIEVAL")
+    parser.add_argument("--chunking", choices=("heading", "window"), help="Overrides RAG_CHUNKING")
+    parser.add_argument("--backlinks", action=argparse.BooleanOptionalAction,
+                        help="Overrides RAG_BACKLINKS")
+    parser.add_argument("--rerank", action=argparse.BooleanOptionalAction, help="Overrides RAG_RERANK")
+    parser.add_argument("--top-k", type=int, help="Overrides RAG_TOP_K")
     args = parser.parse_args()
     settings = settings_from_args(args)
+    for name in ("retrieval", "chunking", "backlinks", "rerank", "top_k"):
+        if getattr(args, name) is not None:
+            setattr(settings, name, getattr(args, name))
 
     questions = load_questions(args.questions)
     console.print(
         f"\n[bold green]Eval harness[/bold green] — {len(questions)} questions, "
         f"{settings.provider} provider"
     )
+    console.print(f"[dim]retrieval={settings.retrieval} chunking={settings.chunking} "
+                  f"backlinks={settings.backlinks} rerank={settings.rerank} top_k={settings.top_k}[/dim]")
     if args.retrieval_only:
         console.print("[dim]Retrieval-only mode (no LLM calls)[/dim]")
 
@@ -293,7 +305,8 @@ def main():
                 sys.exit("--memory needs VAULT_PATH or --vault")
             store = MemoryStore(settings)
             timer = Timer()
-            ingest_vault(store, provider, settings.vault_root, log=lambda *_: None)
+            ingest_vault(store, provider, settings.vault_root, log=lambda *_: None,
+                         chunking=settings.chunking)
             console.print(f"[dim]Indexed {store.stats()['chunks']} chunks in {timer.ms()} ms[/dim]")
         else:
             store = make_store(settings)
@@ -304,7 +317,10 @@ def main():
     summary = print_summary(results, retrieval_only=args.retrieval_only)
     if args.json_out:
         args.json_out.write_text(json.dumps(
-            {"provider": settings.provider, "summary": summary, "results": results}, indent=2))
+            {"provider": settings.provider, "config": {
+                "retrieval": settings.retrieval, "chunking": settings.chunking,
+                "backlinks": settings.backlinks, "rerank": settings.rerank, "top_k": settings.top_k},
+             "summary": summary, "results": results}, indent=2))
     store.close()
 
 

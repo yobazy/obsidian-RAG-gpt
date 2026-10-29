@@ -31,8 +31,8 @@ class IngestTest(unittest.TestCase):
         self.assertNotIn("Ignored.md", names)
         self.assertNotIn("Inbox.md", names)
         self.assertIn("Weekend Loaf.md", names)
-        self.assertEqual(summary["files"], 25)
-        self.assertEqual(summary["changed"], 24)
+        self.assertEqual(summary["files"], 27)
+        self.assertEqual(summary["changed"], 26)
 
     def test_reingest_is_hash_based(self):
         ingest_vault(self.store, self.provider, self.vault, log=quiet)
@@ -67,12 +67,12 @@ class IngestTest(unittest.TestCase):
 
         summary = ingest_vault(self.store, Picky(), self.vault, log=quiet)
         self.assertEqual(summary["failed"], ["Sourdough Starter.md"])
-        self.assertEqual(summary["changed"], 23)
+        self.assertEqual(summary["changed"], 25)
         self.assertIsNotNone(self.store.last_ingest())
 
     def test_last_ingest_is_logged(self):
         ingest_vault(self.store, self.provider, self.vault, log=quiet)
-        self.assertEqual(self.store.last_ingest()["files_seen"], 25)
+        self.assertEqual(self.store.last_ingest()["files_seen"], 27)
 
 
 class RetrieveTest(unittest.TestCase):

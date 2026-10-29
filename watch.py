@@ -16,10 +16,11 @@ console = Console()
 
 
 class VaultHandler(FileSystemEventHandler):
-    def __init__(self, store, provider, vault):
+    def __init__(self, store, provider, vault, chunking="heading"):
         self.store = store
         self.provider = provider
         self.vault = vault
+        self.chunking = chunking
 
     def on_modified(self, event):
         if not event.is_directory and event.src_path.endswith(".md"):
@@ -55,7 +56,7 @@ class VaultHandler(FileSystemEventHandler):
         filename = os.path.basename(path)
         console.print(f"[yellow]⟳ Detected change:[/yellow] {filename}")
         try:
-            count = ingest_file(self.store, self.provider, path)
+            count = ingest_file(self.store, self.provider, path, self.chunking)
             if count:
                 console.print(f"[green]✅ Re-ingested:[/green] {filename} → {count} chunks")
             else:
@@ -73,7 +74,7 @@ def main():
     store.setup()
     vault = str(settings.vault_root)
 
-    handler = VaultHandler(store, make_provider(settings), vault)
+    handler = VaultHandler(store, make_provider(settings), vault, settings.chunking)
     observer = Observer()
     observer.schedule(handler, vault, recursive=True)
     observer.start()
