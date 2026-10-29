@@ -56,7 +56,8 @@ def ingest_file(store, provider, file_path, chunking="heading") -> int:
     path = str(file_path)
     raw = read_note(file_path)
     links = extract_links(raw)
-    tags = note_tags(parse_frontmatter(raw)[0])
+    meta, body = parse_frontmatter(raw)
+    tags = note_tags(meta, body)
 
     if len(clean_markdown(embed_text(raw))) < MIN_NOTE_CHARS:
         if store.file_hash(path) is not None:
@@ -140,7 +141,7 @@ def merge_filters(*filters) -> dict:
 
 
 def retrieve(store, provider, query, top_k=5, min_similarity=0.35, *, mode="vector",
-             filters=None, backlinks=False, rerank=False) -> list[dict]:
+             filters=None, backlinks=False, rerank=False, vault_root=None) -> list[dict]:
     """Find the chunks to answer `query` from.
 
     mode="vector": nearest chunks above `min_similarity`.
@@ -149,11 +150,14 @@ def retrieve(store, provider, query, top_k=5, min_similarity=0.35, *, mode="vect
     query (#tag, tag:x, in:Folder) limit the primary hits. Then the notes the
     hits link to are added, and with `backlinks`, notes that link to the hits.
     `rerank` reorders the candidates with the chat model before the cut.
+    `vault_root` makes folder filters match from the top of the vault.
     """
     if mode not in ("hybrid", "vector"):
         raise ValueError(f"mode must be 'hybrid' or 'vector', got {mode!r}")
     text, inline = parse_filters(query)
     filters = merge_filters(inline, filters)
+    if filters.get("folder") and vault_root:
+        filters["root"] = str(vault_root)
     query_embedding = provider.embed([text], kind="query")[0]
     depth = max(top_k, CANDIDATES_PER_RANKER) if (mode == "hybrid" or rerank) else top_k
     candidates = store.search(query_embedding, depth, min_similarity, filters)

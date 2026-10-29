@@ -204,6 +204,10 @@ def _pct(value):
     return "-" if value is None else f"{value:.0%}"
 
 
+def _num(value):
+    return "-" if value is None else f"{value:.2f}"
+
+
 def print_summary(results, retrieval_only=False):
     table = Table(title="Eval summary")
     table.add_column("#", style="dim")
@@ -231,17 +235,17 @@ def print_summary(results, retrieval_only=False):
     console.print(
         f"\n[bold]Source recall:[/bold] {_pct(summary['source_recall'])}  "
         f"[bold]@3:[/bold] {_pct(summary['source_recall_at_3'])}  "
-        f"[bold]MRR:[/bold] {summary['source_mrr']:.2f}  "
+        f"[bold]MRR:[/bold] {_num(summary['source_mrr'])}  "
         f"[bold]Hit@1:[/bold] {_pct(summary['hit_at_1'])}  "
         f"[bold]All sources found:[/bold] {_pct(summary['all_sources_found'])}"
     )
     console.print(f"[bold]Keyword retrieval:[/bold] {_pct(summary['keyword_retrieval'])}  "
                   f"[bold]Abstain:[/bold] {_pct(summary['abstain_rate'])}  "
-                  f"[bold]Chunks per question:[/bold] {summary['avg_chunks']:.1f}")
+                  f"[bold]Chunks per question:[/bold] {_num(summary['avg_chunks'])}")
     for kind, group in summary["by_type"].items():
         console.print(f"  {kind:<11} n={group['n']:<3} recall {_pct(group['source_recall'])}  "
                       f"@3 {_pct(group['source_recall_at_3'])}  "
-                      f"MRR {group['source_mrr']:.2f}")
+                      f"MRR {_num(group['source_mrr'])}")
     if "answer" in summary:
         console.print(f"[bold]Answer keywords:[/bold] {_pct(summary['answer'])}")
     console.print(f"[bold]Median retrieval latency:[/bold] {summary['median_retrieval_ms']} ms")

@@ -150,7 +150,9 @@ def chunk_note(text: str, chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP,
     merged: list[list[tuple[str, str | None]]] = []
     carry: list = []
     for section in sections:
-        section = carry + section
+        # Carried words take the heading of the section they join, so a
+        # one-line intro doesn't relabel the section after it.
+        section = [(w, section[0][1]) for w, _ in carry] + section
         if len(section) < MIN_SECTION_WORDS:
             carry = section
             continue
@@ -158,7 +160,7 @@ def chunk_note(text: str, chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP,
         merged.append(section)
     if carry:
         if merged:
-            merged[-1].extend(carry)
+            merged[-1].extend((w, merged[-1][-1][1]) for w, _ in carry)
         else:
             merged.append(carry)
 
@@ -187,18 +189,25 @@ def _windows(pairs, chunk_size, overlap) -> list[Chunk]:
     return chunks
 
 
-def note_tags(meta: dict) -> list[str]:
-    """Frontmatter tags, lowercased, without a leading #."""
+_INLINE_TAG = re.compile(r"(?:(?<=\s)|^)#([A-Za-z][\w/-]*)")
+
+
+def note_tags(meta: dict, body: str = "") -> list[str]:
+    """Frontmatter tags plus inline #tags in the body (outside code), lowercased,
+    without a leading #, duplicates dropped."""
     tags = meta.get("tags") or meta.get("tag") or []
     if isinstance(tags, str):
         tags = [t for t in re.split(r"[,\s]+", tags) if t]
-    return [str(t).strip().lstrip("#").lower() for t in tags if str(t).strip().lstrip("#")]
+    out = [str(t).strip().lstrip("#").lower() for t in tags if str(t).strip().lstrip("#")]
+    body = re.sub(r"`[^`\n]*`", "", _CODE_BLOCK.sub("", body))
+    out += [t.lower().rstrip("/-") for t in _INLINE_TAG.findall(body)]
+    return list(dict.fromkeys(t for t in out if t))
 
 
 # Inline filters in a question: #tag, tag:name, in:Folder, folder:"Two Words".
 _FILTER = re.compile(
     r"""(?:(?<=\s)|^)(?:\#(?P<hash>[A-Za-z][\w/-]*)"""
-    r"""|(?P<key>tag|in|folder):(?:"(?P<quoted>[^"]+)"|(?P<bare>[^\s"]+)))"""
+    r"""|(?P<key>tag|in|folder):(?:"(?P<quoted>[^"]+)"|(?P<bare>[^\s"]*[^\s"?.,;:!)])))"""
 )
 
 
@@ -220,7 +229,8 @@ def parse_filters(query: str) -> tuple[str, dict]:
             folder = (match.group("quoted") or match.group("bare")).strip("/")
         return ""
 
-    cleaned = re.sub(r"\s{2,}", " ", _FILTER.sub(take, query)).strip()
+    cleaned = re.sub(r"\s{2,}", " ", _FILTER.sub(take, query))
+    cleaned = re.sub(r"\s+([?.,;:!])", r"\1", cleaned).strip()
     filters = {}
     if tags:
         filters["tags"] = tags
@@ -230,7 +240,10 @@ def parse_filters(query: str) -> tuple[str, dict]:
 
 
 def matches_filters(path: str, tags, filters: dict | None) -> bool:
-    """Whether a note passes {"tags": [...], "folder": "..."} (both optional)."""
+    """Whether a note passes {"tags": [...], "folder": "..."} (both optional).
+
+    With a "root" (the vault path), the folder is matched from the vault root
+    down; without one, any `/Folder/` segment of the path matches."""
     if not filters:
         return True
     wanted = [t.lstrip("#").lower() for t in filters.get("tags") or []]
@@ -239,9 +252,22 @@ def matches_filters(path: str, tags, filters: dict | None) -> bool:
         if not any(t in have or any(h.startswith(t + "/") for h in have) for t in wanted):
             return False
     folder = (filters.get("folder") or "").strip("/")
-    if folder and f"/{folder.lower()}/" not in "/" + path.replace("\\", "/").lower():
-        return False
+    if folder:
+        path = path.replace("\\", "/").lower()
+        prefix = folder_prefix(filters.get("root"), folder)
+        if prefix is not None:
+            if not path.startswith(prefix):
+                return False
+        elif f"/{folder.lower()}/" not in "/" + path:
+            return False
     return True
+
+
+def folder_prefix(root, folder):
+    """Lowercased path prefix for a folder inside the vault, or None without a root."""
+    if not root:
+        return None
+    return (str(root).replace("\\", "/").rstrip("/") + "/" + folder.strip("/") + "/").lower()
 
 
 def parse_frontmatter(text: str) -> tuple[dict, str]:

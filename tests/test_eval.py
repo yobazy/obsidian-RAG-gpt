@@ -2,7 +2,8 @@ import json
 import unittest
 from pathlib import Path
 
-from eval import score_sources, summarize
+import eval as eval_cli
+from eval import print_summary, score_sources, summarize
 from rag.notes import note_name
 from rag.pipeline import markdown_files
 from tests.fakes import FIXTURE_VAULT
@@ -48,14 +49,19 @@ class ScoreSourcesTest(unittest.TestCase):
 
     def test_summary_keeps_abstain_cases_apart(self):
         results = [
-            {"type": "fact", "source_recall": 1.0, "source_recall3": 1.0, "source_rr": 1.0,
+            {"question": "q1", "type": "fact", "source_recall": 1.0, "source_recall3": 1.0, "source_rr": 1.0,
              "source_hit1": True, "retrieval_score": 1.0, "abstained": None, "chunk_count": 2,
              "retrieval_ms": 5},
-            {"type": "abstain", "source_recall": None, "source_recall3": None, "source_rr": None,
+            {"question": "q2", "type": "abstain", "source_recall": None, "source_recall3": None, "source_rr": None,
              "source_hit1": None, "retrieval_score": 0.0, "abstained": True, "chunk_count": 0,
              "retrieval_ms": 3},
         ]
         summary = summarize(results, retrieval_only=True)
+        eval_cli.console.quiet = True
+        try:
+            print_summary(results[1:], retrieval_only=True)  # abstain only: no MRR, must not crash
+        finally:
+            eval_cli.console.quiet = False
         self.assertEqual(summary["source_recall"], 1.0)
         self.assertEqual(summary["keyword_retrieval"], 1.0)
         self.assertEqual(summary["abstain_rate"], 1.0)

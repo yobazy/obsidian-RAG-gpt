@@ -10,7 +10,7 @@ import threading
 from datetime import datetime, timezone
 
 from .config import Settings
-from .notes import Chunk, matches_filters, note_name
+from .notes import Chunk, folder_prefix, matches_filters, note_name
 
 LINKED_CHUNKS_PER_NOTE = 2
 LINKED_CHUNKS_LIMIT = 10
@@ -236,12 +236,18 @@ class PostgresStore:
         tags = [t.lstrip("#").lower() for t in (filters or {}).get("tags") or []]
         if tags:
             sql += """ AND EXISTS (SELECT 1 FROM UNNEST(tags) AS have, UNNEST(%s::text[]) AS want
-                                WHERE LOWER(have) = want OR LOWER(have) LIKE want || '/%%')"""
+                                WHERE LOWER(have) = want
+                                   OR LEFT(LOWER(have), LENGTH(want) + 1) = want || '/')"""
             params.append(tags)
         folder = ((filters or {}).get("folder") or "").strip("/")
         if folder:
-            sql += " AND STRPOS(LOWER(file_path), %s) > 0"
-            params.append(f"/{folder.lower()}/")
+            prefix = folder_prefix((filters or {}).get("root"), folder)
+            if prefix is not None:
+                sql += " AND LEFT(LOWER(file_path), %s) = %s"
+                params += [len(prefix), prefix]
+            else:
+                sql += " AND STRPOS(LOWER(file_path), %s) > 0"
+                params.append(f"/{folder.lower()}/")
         return sql, params
 
     @staticmethod
@@ -251,7 +257,11 @@ class PostgresStore:
     def search(self, embedding, top_k, min_similarity, filters=None):
         vec = self._vec(embedding)
         where, params = self._filter_sql(filters)
-        rows = self._run(f"""
+        # HNSW filters after the index scan, which only yields ef_search
+        # candidates (40 by default); a filter on a small folder or tag would
+        # then find almost nothing. Widen the scan for this transaction.
+        widen = "SET LOCAL hnsw.ef_search = 400;" if where else ""
+        rows = self._run(f"""{widen}
             SELECT file_path, content, backlinks, 1 - (embedding <=> %s::vector) AS similarity,
                    heading, chunk_index
             FROM {{t}}

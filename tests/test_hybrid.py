@@ -48,6 +48,12 @@ class ChunkingTest(unittest.TestCase):
         self.assertGreater(len(chunks), 2)
         self.assertTrue(all(len(c.content.split()) <= CHUNK_SIZE for c in chunks))
 
+    def test_short_intro_does_not_relabel_the_next_section(self):
+        body = "# Loaf\n\nA short intro.\n\n## Lessons\n\n" + "word " * 450
+        chunks = chunk_note(body, mode="heading", title="Loaf")
+        self.assertEqual(chunks[0].heading, "Lessons")
+        self.assertTrue(chunks[0].index_text.startswith("Loaf > Lessons"))
+
     def test_unknown_mode(self):
         with self.assertRaises(ValueError):
             chunk_note("# x\n" + "word " * 500, mode="sentences")
@@ -58,6 +64,25 @@ class FilterParsingTest(unittest.TestCase):
         q, f = parse_filters('#book which one tag:Fiction in:"Side Projects" about C# issue #12')
         self.assertEqual(q, "which one about C# issue #12")
         self.assertEqual(f, {"tags": ["book", "fiction"], "folder": "Side Projects"})
+
+    def test_trailing_punctuation_is_not_part_of_the_filter(self):
+        self.assertEqual(parse_filters("What recipes are in:Kitchen?"),
+                         ("What recipes are?", {"folder": "Kitchen"}))
+        self.assertEqual(parse_filters("tag:book, any?")[1], {"tags": ["book"]})
+        self.assertEqual(parse_filters("what is #kimchi?")[0], "what is?")
+
+    def test_folder_is_matched_from_the_vault_root(self):
+        path = "/home/u/Documents/vault/Kitchen/Kimchi.md"
+        self.assertTrue(matches_filters(path, [], {"folder": "Documents"}))  # no root: segment match
+        root = "/home/u/Documents/vault"
+        self.assertFalse(matches_filters(path, [], {"folder": "Documents", "root": root}))
+        self.assertTrue(matches_filters(path, [], {"folder": "kitchen", "root": root}))
+        nested = "/home/u/Documents/vault/Projects/Kitchen/Plan.md"
+        self.assertFalse(matches_filters(nested, [], {"folder": "Kitchen", "root": root}))
+
+    def test_inline_body_tags(self):
+        body = "Notes #recipe and #Bread/sourdough.\n# Heading\n`#notatag`\nissue #12 C#"
+        self.assertEqual(note_tags({"tags": ["recipe"]}, body), ["recipe", "bread/sourdough"])
 
     def test_no_filters_leaves_query_alone(self):
         self.assertEqual(parse_filters("what is 2#3?"), ("what is 2#3?", {}))
@@ -194,6 +219,10 @@ class PostgresSqlTest(unittest.TestCase):
         self.assertNotIn("Reading", sql)
         self.assertEqual(params, [["book"], "/reading/"])
         self.assertEqual(PostgresStore._filter_sql(None), ("", []))
+        sql, params = PostgresStore._filter_sql({"folder": "Kitchen", "root": "/v/Vault"})
+        self.assertIn("LEFT(LOWER(file_path), %s) = %s", sql)
+        self.assertEqual(params, [len("/v/vault/kitchen/"), "/v/vault/kitchen/"])
+        self.assertNotIn("LIKE", PostgresStore._filter_sql({"tags": ["to_do"]})[0])
 
     def test_keyword_terms(self):
         self.assertEqual(keyword_terms("Where is the NB04 station?"), ["nb04", "station"])

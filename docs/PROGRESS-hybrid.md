@@ -128,6 +128,61 @@ One question changed: "Who gave me the tomato seedlings?" moved Tom Okafor from 
 
 **Decision: keep it, off by default.** One question better for about 40 times the retrieval time (and several seconds more when qwen3 is cold) isn't worth it as a default on this set. It may earn its place on a real vault with more near-duplicates; try `python eval.py --provider local --rerank` on your own questions.
 
-## Status
+## Self-review
 
-All three stages done. Self-review next.
+A fresh reviewer read `git diff origin/web-and-local...HEAD` cold. It found nothing wrong in the Postgres SQL (it checked placeholders, the generated column's immutability, DISTINCT ON ordering and migrating a `chunks` table that already has rows). It found six real problems. All are fixed, each with a test:
+
+1. Inline filters kept trailing punctuation: `in:Kitchen?` looked for a folder called "Kitchen?" and found nothing. Bare values now stop before `?.,;:!)`, and the leftover " ?" is tidied up.
+2. A short intro merged into the next section gave that chunk the note title as its heading instead of the section's. Carried words now take the heading of the section they join.
+3. The folder filter matched any folder in the absolute path, so with the vault under `~/Documents`, `in:Documents` matched everything. Folders now match from the vault root down (`retrieve(..., vault_root=)`, passed from settings). Without a root it falls back to matching a path segment.
+4. `#tag` filters only saw frontmatter tags. Inline `#tags` in the body (outside code) are now stored too.
+5. Postgres with HNSW applies the filter after the index scan, which returns only 40 candidates by default, so filtering on a small tag or folder could find almost nothing. A filtered vector search now runs `SET LOCAL hnsw.ef_search = 400` first. **Not executed** (no database here).
+6. The eval summary crashed when no question had expected sources. Fixed.
+
+The Postgres tag-prefix check used `LIKE`, so `_` in a tag acted as a wildcard. It now uses `LEFT(...) = want || '/'`.
+
+Final run after the fixes (new defaults, with answers): recall 100%, @3 97%, MRR 0.97, hit@1 95%, answer keywords 98%, median retrieval 16 ms, median answer 723 ms.
+
+Seen in the screenshot and left as is (these predate this branch):
+
+- `_clean_line` strips `_`, so `water_temp_c` is stored as `watertempc`. A keyword search for the exact column name misses it; the vector side still found it.
+- Snippets start with "Tags: ..." because tags are part of the chunk text.
+- Source cards are in fused order, so the "% match" numbers aren't always descending.
+
+## Checks run
+
+- `python3 -m unittest discover -s tests -t .`: 91 tests, OK (3 live tests skipped). That's 41 more than at the base.
+- `python3 -m tests.live`: 5 tests, OK, against Ollama on pc (including a real qwen3 rerank).
+- `cd web && npm ci && npm run build`: clean.
+- Screenshots of the web app on the fixture vault, asking "Which notes link to the Lighthouse App?" (cards 7 and 8 show "Links here"):
+  - `/data/tmp/overnight-2026-10-29/scratch/f-rag-hybrid/screenshots/desktop-2-answer.png`
+  - `/data/tmp/overnight-2026-10-29/scratch/f-rag-hybrid/screenshots/phone-2b-sources.png`
+  - plus the empty and preview shots in the same folder.
+- Eval logs and JSON for every run quoted above: `/data/tmp/overnight-2026-10-29/scratch/f-rag-hybrid/eval/`.
+
+## How to try it
+
+```bash
+# fixture eval, new defaults (hybrid, heading chunks, backlinks)
+python3 eval.py --provider local --vault tests/fixtures/vault --memory --questions tests/fixtures/questions.json
+
+# compare against the old behaviour, or try rerank
+python3 eval.py ... --retrieval vector --chunking window --no-backlinks
+python3 eval.py ... --rerank
+
+# web app with filters: ask "#book which one did I read in a weekend?"
+python3 server.py --provider local --vault tests/fixtures/vault --memory
+```
+
+## Cleanup
+
+I stopped the API server (port 8797) I started. No containers were created (docker was held). The scratch venv at `scratch/f-rag-hybrid/venv` is empty; pip was held.
+
+## Needs Bazil
+
+1. **Run the Postgres path once.** Docker and pip were held again, so `setup()`'s new `tags` and `tsv` columns, the GIN index, `keyword_search`, `backlink_chunks` and the `ef_search` widening have only been read, never run. On the real `chunks` table, adding the generated `tsv` column rewrites the table once (a short lock). Try it on a scratch database first.
+2. **One re-index when you upgrade.** The default chunking is now `heading`, so the first `ingest.py` re-embeds every note once. For cloud, that's Voyage calls for the whole vault. A: accept it · B: set `RAG_CHUNKING=window` to keep the old chunks, then switch when convenient.
+3. **Run the eval on your real questions** with `--retrieval vector --chunking window --no-backlinks` and then with the defaults. The fixture vault is small and made up, so the gains here are a direction, not a promise. Add `expected_sources` to your `eval/questions.json` to get the source metrics.
+4. **Rerank on your vault?** Off by default (+600 ms for one question gained here). Try `--rerank` on your questions. A: leave it off · B: turn it on if it helps there.
+5. **Abstain is 0%.** Off-topic questions ("passport number") still score above the 0.5 local threshold and get an answer built from loosely related notes. That's a threshold or prompt question for another day.
+6. **Cloud baseline wasn't run** (no keys here). Run the eval with `--provider cloud` once to record it.

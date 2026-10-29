@@ -63,7 +63,8 @@ class Settings:
 
     def retrieval_options(self) -> dict:
         """Keyword arguments for pipeline.retrieve."""
-        return {"mode": self.retrieval, "backlinks": self.backlinks, "rerank": self.rerank}
+        return {"mode": self.retrieval, "backlinks": self.backlinks, "rerank": self.rerank,
+                "vault_root": self.vault_root}
 
     def spec(self) -> ProviderSpec:
         if self.provider == "local":
