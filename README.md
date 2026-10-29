@@ -141,6 +141,8 @@ For a single process, build the app once (`cd web && npm run build`) and `server
 
 API endpoints: `POST /ask` (NDJSON stream of `sources`, `token`, `done` or `error` events), `GET /search?q=`, `GET /notes/<path>`, `GET /status`, `POST /ingest`. The server only reads the vault, never writes to it.
 
+The server answers only to `localhost`, `127.0.0.1` and the `--host` it binds to, and POSTs must be `application/json`, so other web pages open in your browser can't read your notes through it. There is no login: to reach it by another name (say your Tailscale hostname with `--host 0.0.0.0`), list that name in `RAG_ALLOWED_HOSTS` and keep it off public networks.
+
 ### 9. Run the eval harness
 
 Score retrieval and answer quality against hand-written Q&A pairs from your notes:

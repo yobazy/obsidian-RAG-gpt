@@ -1,5 +1,8 @@
+import http.client
 import json
+import os
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -114,15 +117,78 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(body["links"], [{"name": "Sourdough Starter", "path": "Kitchen/Sourdough Starter.md"}])
         self.assertEqual(body["backlinks"], [{"name": "Sourdough Starter", "path": "Kitchen/Sourdough Starter.md"}])
 
-    def test_unresolved_links_have_no_path(self):
+    def test_image_embeds_are_not_listed_as_links(self):
         _, body = get(self.base, "/notes/" + quote("Coast Path Ride.md"))
         self.assertEqual(body["links"], [{"name": "Lighthouse App", "path": "Projects/Lighthouse App.md"}])
 
+    def test_unresolved_links_have_no_path(self):
+        # No fixture note links to a missing note, so check the resolver directly.
+        self.assertEqual(self.app.resolve_links(["Weekend Loaf", "Not Written Yet"]),
+                         [{"name": "Weekend Loaf", "path": "Kitchen/Weekend Loaf.md"},
+                          {"name": "Not Written Yet", "path": None}])
+
     def test_note_paths_cannot_escape_the_vault(self):
-        for path in ["../../../README.md", quote("../test_notes.py", safe=""), ".obsidian/Ignored.md",
+        # README.md exists two levels above tests/fixtures/vault, so these only
+        # 404 because of the containment check, not because the file is missing.
+        for path in ["../../../README.md", quote("../../../README.md", safe=""), ".obsidian/Ignored.md",
                      "Missing.md", quote("/etc/passwd", safe="")]:
             code, _ = http_error(lambda: get(self.base, "/notes/" + path))
             self.assertEqual(code, 404, path)
+
+    def raw(self, method, path, body=None, headers=None):
+        conn = http.client.HTTPConnection("127.0.0.1", self.server.server_address[1], timeout=10)
+        try:
+            conn.request(method, path, body=body, headers=headers or {})
+            r = conn.getresponse()
+            return r.status, r.read()
+        finally:
+            conn.close()
+
+    def test_other_host_names_are_refused(self):
+        # A page that rebinds its own domain to 127.0.0.1 sends its domain as Host.
+        status, _ = self.raw("GET", "/notes/" + quote("Kitchen/Weekend Loaf.md"),
+                             headers={"Host": "attacker.example:8790"})
+        self.assertEqual(status, 403)
+        status, _ = self.raw("POST", "/ask", body=b'{"question": "starter"}',
+                             headers={"Host": "attacker.example", "Content-Type": "application/json"})
+        self.assertEqual(status, 403)
+        status, _ = self.raw("GET", "/status", headers={"Host": "localhost:8790"})
+        self.assertEqual(status, 200)
+
+    def test_allowed_hosts_can_be_extended(self):
+        os.environ["RAG_ALLOWED_HOSTS"] = "pc.example.ts.net"
+        try:
+            server = make_server(self.app, port=0)
+        finally:
+            del os.environ["RAG_ALLOWED_HOSTS"]
+        self.assertIn("pc.example.ts.net", server.RequestHandlerClass.allowed_hosts)
+        self.assertIn("127.0.0.1", server.RequestHandlerClass.allowed_hosts)
+        server.server_close()
+        wide = make_server(self.app, host="0.0.0.0", port=0)
+        self.assertNotIn("0.0.0.0", wide.RequestHandlerClass.allowed_hosts)
+        wide.server_close()
+
+    def test_posts_must_be_json(self):
+        # text/plain and form posts skip the CORS preflight, so any site could send them.
+        for path in ("/ask", "/ingest"):
+            status, _ = self.raw("POST", path, body=b'{"question": "starter"}',
+                                 headers={"Content-Type": "text/plain"})
+            self.assertEqual(status, 415, path)
+
+    def test_ask_body_must_be_an_object(self):
+        for body in (b"[]", b'"starter"', b"not json"):
+            status, _ = self.raw("POST", "/ask", body=body, headers={"Content-Type": "application/json"})
+            self.assertEqual(status, 400, body)
+        with post(self.base, "/ask", {"question": "sourdough starter", "history": "oops"}) as r:
+            events = [json.loads(line) for line in r if line.strip()]
+        self.assertEqual(events[-1]["type"], "done")
+
+    def test_search_k_is_bounded(self):
+        for k in ("-1", "1000"):
+            code, _ = http_error(lambda: get(self.base, f"/search?q=bread&k={k}"))
+            self.assertEqual(code, 400, k)
+        _, body = get(self.base, "/search?q=" + quote("sourdough starter") + "&k=1")
+        self.assertEqual(len([r for r in body["results"] if not r["via_link"]]), 1)
 
 
 class BrokenMidAnswerTest(unittest.TestCase):
@@ -170,6 +236,31 @@ class BackendDownTest(unittest.TestCase):
         _, body = get(self.base, "/status")
         self.assertFalse(body["backend"]["reachable"])
         self.assertEqual(body["index"]["notes"], 8)
+
+
+class UnreachablePcFailsFastTest(unittest.TestCase):
+    """When ping already says pc is down, don't wait out the embed timeout."""
+
+    class Hangs(DownProvider):
+        def embed(self, texts, kind):
+            time.sleep(5)  # stands in for a connect to a pc that is switched off
+            return super().embed(texts, kind)
+
+    def setUp(self):
+        self.app, self.server, self.base = start(self.Hangs())
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+    def test_ask_and_search_return_quickly(self):
+        started = time.perf_counter()
+        events = list(self.app.ask("anything"))
+        self.assertEqual(events[-1]["code"], "backend_unavailable")
+        self.assertIn("Can't reach Ollama", events[-1]["message"])
+        code, _ = http_error(lambda: get(self.base, "/search?q=bread"))
+        self.assertEqual(code, 503)
+        self.assertLess(time.perf_counter() - started, 2)
 
 
 if __name__ == "__main__":

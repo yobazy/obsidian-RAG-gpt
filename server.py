@@ -16,6 +16,7 @@ Anything else is served from web/dist when it has been built.
 import argparse
 import json
 import mimetypes
+import os
 import threading
 import time
 from http import HTTPStatus
@@ -32,6 +33,8 @@ from rag.store import make_store
 WEB_DIST = Path(__file__).parent / "web" / "dist"
 SNIPPET_CHARS = 280
 PING_CACHE_SECONDS = 10
+MAX_SEARCH_K = 50
+LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 
 class NotFound(Exception):
@@ -92,6 +95,16 @@ class App:
             self._ping = (time.monotonic(), result)
         return result
 
+    def require_backend(self):
+        """Fail fast when pc is down. Without this, an unreachable pc makes the
+        embed call wait out the full read timeout (twice) before erroring."""
+        if self.settings.provider != "local":
+            return {}
+        health = self.ping()
+        if not health.get("reachable"):
+            raise ProviderUnavailable(health.get("error") or "Can't reach Ollama.")
+        return health
+
     # ---------------------------------------------------------- endpoints
 
     def status(self) -> dict:
@@ -130,6 +143,7 @@ class App:
 
     def search(self, query, top_k=None) -> dict:
         timer = Timer()
+        self.require_backend()
         chunks = retrieve(self.store, self.provider, query, top_k or self.settings.top_k,
                           self.settings.threshold)
         return {"query": query, "results": [self.source(c, i + 1) for i, c in enumerate(chunks)],
@@ -162,8 +176,8 @@ class App:
         timer = Timer()
         try:
             if self.settings.provider == "local":
-                health = self.ping()
-                if health.get("reachable") and not health.get("chat_loaded"):
+                health = self.require_backend()
+                if not health.get("chat_loaded"):
                     yield {"type": "status", "message":
                            f"Loading {self.settings.ollama_chat_model} on pc. "
                            "The first answer after a pause takes a few extra seconds."}
@@ -216,6 +230,7 @@ def snippet_text(content: str, title: str) -> str:
 
 class Handler(BaseHTTPRequestHandler):
     app: App = None  # set by make_server
+    allowed_hosts = LOOPBACK_HOSTS
     server_version = "obsidian-rag"
 
     def log_message(self, fmt, *args):  # quieter than the default
@@ -233,7 +248,22 @@ class Handler(BaseHTTPRequestHandler):
     def _error(self, status, message):
         self._json({"error": message}, status)
 
+    def _host_allowed(self) -> bool:
+        """Reject requests whose Host isn't this server, so a web page that
+        rebinds its domain to 127.0.0.1 (DNS rebinding) can't read notes."""
+        host = self.headers.get("Host")
+        if host is None:
+            return True  # HTTP/1.0 clients; browsers always send Host
+        name = urlparse("//" + host).hostname or ""
+        return name in self.allowed_hosts
+
+    def _refuse(self):
+        self._error(HTTPStatus.FORBIDDEN,
+                    "Host not allowed. Add it to RAG_ALLOWED_HOSTS to reach the server by that name.")
+
     def do_GET(self):
+        if not self._host_allowed():
+            return self._refuse()
         url = urlparse(self.path)
         try:
             if url.path == "/status":
@@ -244,6 +274,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not query:
                     return self._error(HTTPStatus.BAD_REQUEST, "Add a query: /search?q=...")
                 k = int((params.get("k") or [0])[0]) or None
+                if k is not None and not 1 <= k <= MAX_SEARCH_K:
+                    return self._error(HTTPStatus.BAD_REQUEST, f"k must be between 1 and {MAX_SEARCH_K}.")
                 return self._json(self.app.search(query, k))
             if url.path.startswith("/notes/"):
                 return self._json(self.app.note(unquote(url.path[len("/notes/"):])))
@@ -256,6 +288,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(HTTPStatus.BAD_REQUEST, str(e))
 
     def do_POST(self):
+        if not self._host_allowed():
+            return self._refuse()
+        # Other sites can send text/plain or form POSTs here without a CORS
+        # preflight; requiring JSON means a browser only sends same-origin ones.
+        content_type = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        if content_type != "application/json":
+            return self._error(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, "Send Content-Type: application/json.")
         url = urlparse(self.path)
         if url.path == "/ingest":
             self.app.ingest_in_background()
@@ -266,11 +305,14 @@ class Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length") or 0)
             body = json.loads(self.rfile.read(length) or b"{}")
         except (ValueError, json.JSONDecodeError):
+            body = None
+        if not isinstance(body, dict):
             return self._error(HTTPStatus.BAD_REQUEST, "Send JSON: {\"question\": \"...\"}")
         question = str(body.get("question") or "").strip()
         if not question:
             return self._error(HTTPStatus.BAD_REQUEST, "Ask a question first.")
-        history = [m for m in body.get("history") or []
+        history = body.get("history")
+        history = [m for m in (history if isinstance(history, list) else [])
                    if isinstance(m, dict) and m.get("role") in ("user", "assistant")
                    and isinstance(m.get("content"), str) and m["content"].strip()]
 
@@ -304,7 +346,10 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def make_server(app: App, host="127.0.0.1", port=8790) -> ThreadingHTTPServer:
-    handler = type("BoundHandler", (Handler,), {"app": app})
+    extra = {h.strip().lower() for h in os.getenv("RAG_ALLOWED_HOSTS", "").split(",") if h.strip()}
+    bind = host.strip("[]").lower()
+    allowed = LOOPBACK_HOSTS | extra | ({bind} if bind not in ("", "0.0.0.0", "::") else set())
+    handler = type("BoundHandler", (Handler,), {"app": app, "allowed_hosts": allowed})
     server = ThreadingHTTPServer((host, port), handler)
     server.daemon_threads = True
     return server
