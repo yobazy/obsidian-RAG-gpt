@@ -113,7 +113,9 @@ docker run -d \
 python ingest.py
 ```
 
-This walks your vault, chunks each note, embeds via Voyage AI, and stores in pgvector. Re-ingestion is hash-based — unchanged files are skipped automatically.
+This walks your vault, chunks each note, embeds via Voyage AI, and stores in pgvector. Re-ingestion is hash-based: unchanged files are skipped automatically.
+
+**Upgrading an existing index:** the first ingest after updating to heading-aware chunks (the default, `RAG_CHUNKING=heading`) re-embeds every note once, because the stored hashes now record the chunking mode. On the cloud provider that means Voyage calls for the whole vault. Later ingests skip unchanged notes again. To put it off, set `RAG_CHUNKING=window` and keep the old chunks until you switch.
 
 ### 6. (Optional) Watch for changes
 
