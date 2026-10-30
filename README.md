@@ -193,7 +193,7 @@ python chat.py --provider local
 python server.py --provider local
 ```
 
-- **Separate index per provider.** The cloud provider keeps the original `chunks` table (1024-dim Voyage vectors); local mode writes to `chunks_nomic_768`. Switching back and forth never overwrites the other index, and migrations only add tables and columns.
+- **Separate index per provider.** The cloud provider keeps the original `chunks` table (1024-dim Voyage vectors); local mode writes to `chunks_nomic_768`. Switching back and forth never overwrites the other index, and migrations only add tables and columns. One exception: an old `chunks` table's ivfflat vector index (built while the table was empty, so it misses most neighbours) is replaced by an HNSW index on the next ingest. That rebuilds an index, not your rows.
 - **Cold starts.** Ollama unloads idle models, so the first answer after a pause can take several seconds. Requests wait up to `OLLAMA_TIMEOUT` (180 s), and the web app says when the model is loading.
 - **Server down.** If Ollama can't be reached, scripts and the web app say so plainly instead of crashing; status and note previews keep working.
 - **Similarity threshold.** nomic scores run higher than Voyage's, so local mode filters at 0.5 by default (cloud: 0.35). Override with `RAG_MIN_SIMILARITY`.
@@ -205,6 +205,10 @@ To try the web app without Postgres, index a vault in memory: `python server.py 
 ```bash
 python -m unittest discover -s tests -t .   # fake provider and in-memory index, no services needed
 python -m tests.live                        # also calls the real Ollama
+
+# Postgres store against a scratch pgvector database (makes and drops test_chunks_* tables)
+RAG_TEST_PG_DSN="host=127.0.0.1 port=5432 dbname=rag_test user=rag password=rag" \
+  python -m unittest tests.test_postgres
 ```
 
 The tests run against `tests/fixtures/vault`, a small made-up vault with frontmatter and wikilinks.

@@ -5,7 +5,7 @@ from pathlib import Path
 
 from rag.notes import CHUNK_SIZE, chunk_note, matches_filters, note_tags, parse_filters
 from rag.pipeline import fuse, index_hash, ingest_vault, merge_filters, retrieve
-from rag.store import MemoryStore, PostgresStore, _tsquery, keyword_terms
+from rag.store import MemoryStore, PostgresStore, _tsquery_words, keyword_terms
 from tests.fakes import FIXTURE_VAULT, FakeProvider
 
 
@@ -209,9 +209,9 @@ class PostgresSqlTest(unittest.TestCase):
     """Only the pieces that don't need a database."""
 
     def test_tsquery_has_no_operators_from_the_user(self):
-        self.assertEqual(_tsquery("what's the 'water_temp_c' & | ! <-> column?"),
-                         "water | temp | column")
-        self.assertEqual(_tsquery("the and of"), "")
+        self.assertEqual(_tsquery_words("what's the 'water_temp_c' & | ! <-> column?"),
+                         ["water", "temp", "column"])
+        self.assertEqual(_tsquery_words("the and of"), [])
 
     def test_filter_sql_is_parameterised(self):
         sql, params = PostgresStore._filter_sql({"tags": ["#Book"], "folder": "/Reading/"})

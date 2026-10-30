@@ -1,7 +1,8 @@
 """Chunk storage: Postgres + pgvector, or an in-memory store for tests and demos.
 
 Migrations here only ever add (CREATE ... IF NOT EXISTS, ADD COLUMN IF NOT
-EXISTS). Nothing is dropped, and each provider writes to its own table.
+EXISTS), and each provider writes to its own table. The one thing dropped is
+an old ivfflat vector index, replaced by HNSW; no data is ever dropped.
 """
 
 import math
@@ -51,14 +52,14 @@ def _stem(word: str) -> str:
     return word
 
 
-def _tsquery(query: str) -> str:
-    """An OR query for to_tsquery built only from [a-z0-9] words, so no
-    tsquery syntax from the user ever reaches Postgres. Postgres's parser
-    splits `water_temp_c` into words, so do the same here."""
+def _tsquery_words(query: str) -> list[str]:
+    """Query words for to_tsquery, built only from [a-z0-9], so no tsquery
+    syntax from the user ever reaches Postgres. Postgres's parser splits
+    `water_temp_c` into words, so do the same here."""
     words = []
     for term in keyword_terms(query):
         words.extend(w for w in term.split("_") if len(w) > 1)
-    return " | ".join(dict.fromkeys(words))
+    return list(dict.fromkeys(words))
 
 
 class DimensionMismatch(RuntimeError):
@@ -106,10 +107,10 @@ class PostgresStore:
                 raise
 
     def setup(self):
+        from psycopg2 import sql
+
         with self._lock, self.conn.cursor() as cur:
             cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
-            cur.execute("SELECT to_regclass(%s)", (self.table,))
-            exists = cur.fetchone()[0] is not None
             cur.execute(f"""
                 CREATE TABLE IF NOT EXISTS {self.table} (
                     id SERIAL PRIMARY KEY,
@@ -147,12 +148,25 @@ class PostgresStore:
                     f"provider makes {self.dim}-dim ones. Point CHUNKS_TABLE_"
                     f"{self.provider.upper()} at another table."
                 )
-            if not exists:
-                # HNSW works on an empty table; ivfflat needs data to train on.
+            # HNSW works on an empty table; ivfflat needs data to train on.
+            # The first `chunks` tables got an ivfflat index built while still
+            # empty, which finds only a few of the nearest rows once the
+            # planner uses it. Swap it for HNSW (an index only; rows stay).
+            cur.execute("""
+                SELECT i.relname, am.amname FROM pg_index x
+                JOIN pg_class i ON i.oid = x.indexrelid
+                JOIN pg_am am ON am.oid = i.relam
+                WHERE x.indrelid = %s::regclass AND am.amname IN ('hnsw', 'ivfflat')
+            """, (self.table,))
+            vector_indexes = cur.fetchall()
+            if not any(am == "hnsw" for _, am in vector_indexes):
                 cur.execute(f"""
                     CREATE INDEX IF NOT EXISTS {self.table}_embedding_hnsw
                     ON {self.table} USING hnsw (embedding vector_cosine_ops);
                 """)
+            for name, am in vector_indexes:
+                if am == "ivfflat":
+                    cur.execute(sql.SQL("DROP INDEX IF EXISTS {}").format(sql.Identifier(name)))
             cur.execute(f"""
                 CREATE INDEX IF NOT EXISTS {self.table}_file_path_idx ON {self.table} (file_path);
             """)
@@ -272,24 +286,38 @@ class PostgresStore:
         return self._rows(rows)
 
     def keyword_search(self, query, top_k, filters=None, embedding=None):
-        """Full-text match on any query word, ranked by ts_rank with length
-        normalisation (BM25-like, not exact BM25). `similarity` is the cosine
-        to `embedding` when given, so callers can show it."""
-        tsq = _tsquery(query)
-        if not tsq:
+        """Full-text match on any query word. Each word scores ts_rank with
+        length normalisation times the word's BM25 IDF over the table, so a
+        word in every note counts for less than a rare one (ts_rank alone has
+        no IDF). BM25-like, not exact BM25. `similarity` is the cosine to
+        `embedding` when given, so callers can show it."""
+        words = _tsquery_words(query)
+        if not words:
             return []
         where, params = self._filter_sql(filters)
         if embedding is not None:
             sim, sim_params = "1 - (embedding <=> %s::vector)", [self._vec(embedding)]
         else:
             sim, sim_params = "0.0", []
+        # One tsquery per stemmed word (weekly and week share one), dropping
+        # Postgres stopwords; the document counts use the GIN index.
         rows = self._run(f"""
+            WITH q AS (
+                SELECT DISTINCT ON (tq::text) tq
+                FROM UNNEST(%s::text[]) AS w, to_tsquery('english', w) AS tq
+                WHERE numnode(tq) > 0
+            ), n AS (SELECT COUNT(*)::float8 AS n FROM {{t}}),
+            w AS (
+                SELECT q.tq, LN(1 + (n.n - d.df + 0.5) / (d.df + 0.5)) AS idf
+                FROM q, n, LATERAL (SELECT COUNT(*)::float8 AS df FROM {{t}} WHERE tsv @@ q.tq) d
+            )
             SELECT file_path, content, backlinks, {sim} AS similarity, heading, chunk_index
-            FROM {{t}}, to_tsquery('english', %s) AS q
-            WHERE tsv @@ q{where}
-            ORDER BY ts_rank(tsv, q, 1) DESC, file_path, chunk_index
+            FROM {{t}} c JOIN w ON c.tsv @@ w.tq
+            WHERE TRUE{where}
+            GROUP BY c.id
+            ORDER BY SUM(w.idf * ts_rank(c.tsv, w.tq, 1)) DESC, file_path, chunk_index
             LIMIT %s
-        """, (*sim_params, tsq, *params, top_k), fetch=True)
+        """, (words, *sim_params, *params, top_k), fetch=True)
         return self._rows(rows)
 
     def chunks_for_names(self, names, exclude_files=()):
