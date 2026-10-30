@@ -31,8 +31,8 @@ class IngestTest(unittest.TestCase):
         self.assertNotIn("Ignored.md", names)
         self.assertNotIn("Inbox.md", names)
         self.assertIn("Weekend Loaf.md", names)
-        self.assertEqual(summary["files"], 9)
-        self.assertEqual(summary["changed"], 8)
+        self.assertEqual(summary["files"], 27)
+        self.assertEqual(summary["changed"], 26)
 
     def test_reingest_is_hash_based(self):
         ingest_vault(self.store, self.provider, self.vault, log=quiet)
@@ -67,12 +67,12 @@ class IngestTest(unittest.TestCase):
 
         summary = ingest_vault(self.store, Picky(), self.vault, log=quiet)
         self.assertEqual(summary["failed"], ["Sourdough Starter.md"])
-        self.assertEqual(summary["changed"], 7)
+        self.assertEqual(summary["changed"], 25)
         self.assertIsNotNone(self.store.last_ingest())
 
     def test_last_ingest_is_logged(self):
         ingest_vault(self.store, self.provider, self.vault, log=quiet)
-        self.assertEqual(self.store.last_ingest()["files_seen"], 9)
+        self.assertEqual(self.store.last_ingest()["files_seen"], 27)
 
 
 class RetrieveTest(unittest.TestCase):
@@ -100,7 +100,7 @@ class RetrieveTest(unittest.TestCase):
 
     def test_backlinks(self):
         sources = {Path(p).name for p in self.store.backlinks_to("sourdough starter")}
-        self.assertEqual(sources, {"Weekend Loaf.md", "Pantry Staples.md"})
+        self.assertEqual(sources, {"Weekend Loaf.md", "Pantry Staples.md", "Focaccia.md"})
 
     def test_answer_keeps_history(self):
         history = []

@@ -55,6 +55,17 @@ class Settings:
     top_k: int = 5
     min_similarity: float | None = None  # None means the provider default
 
+    # Retrieval. See docs/PROGRESS-hybrid.md for the measurements behind the defaults.
+    retrieval: str = "hybrid"  # hybrid (keywords + vectors, RRF) | vector
+    chunking: str = "heading"  # heading (split at headings) | window (word windows)
+    backlinks: bool = True  # also pull in notes that link to the top hits
+    rerank: bool = False  # reorder candidates with the local chat model
+
+    def retrieval_options(self) -> dict:
+        """Keyword arguments for pipeline.retrieve."""
+        return {"mode": self.retrieval, "backlinks": self.backlinks, "rerank": self.rerank,
+                "vault_root": self.vault_root}
+
     def spec(self) -> ProviderSpec:
         if self.provider == "local":
             return ProviderSpec(
@@ -84,6 +95,20 @@ class Settings:
     def vault_root(self) -> Path | None:
         # Not resolved: stored paths must match what earlier ingests wrote.
         return Path(self.vault_path).expanduser() if self.vault_path else None
+
+
+def _bool(name, default):
+    value = os.getenv(name)
+    if value in (None, ""):
+        return default
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _choice(name, default, choices):
+    value = (os.getenv(name) or default).strip().lower()
+    if value not in choices:
+        raise ValueError(f"{name} must be one of {choices}, got {value!r}")
+    return value
 
 
 def _float(name, default):
@@ -132,6 +157,10 @@ def load_settings(**overrides) -> Settings:
         claude_model=os.getenv("CLAUDE_MODEL", Settings.claude_model),
         top_k=int(os.getenv("RAG_TOP_K", Settings.top_k)),
         min_similarity=_float("RAG_MIN_SIMILARITY", None),
+        retrieval=_choice("RAG_RETRIEVAL", Settings.retrieval, ("hybrid", "vector")),
+        chunking=_choice("RAG_CHUNKING", Settings.chunking, ("heading", "window")),
+        backlinks=_bool("RAG_BACKLINKS", Settings.backlinks),
+        rerank=_bool("RAG_RERANK", Settings.rerank),
     )
     for key, value in overrides.items():
         setattr(settings, key, value)

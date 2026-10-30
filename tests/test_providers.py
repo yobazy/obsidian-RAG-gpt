@@ -38,6 +38,17 @@ class LiveOllamaTest(unittest.TestCase):
         self.assertTrue(text.strip())
         self.assertNotIn("<think>", text)
 
+    def test_rerank_puts_the_answer_first(self):
+        from rag.rerank import rerank_rows
+
+        rows = [
+            {"file": "/v/Boiler.md", "content": "The boiler gauge should read 1.2 bar.", "heading": None},
+            {"file": "/v/Bike.md", "content": "Tyres at 4.5 bar front, 4.8 bar rear.", "heading": None},
+        ]
+        out = rerank_rows(self.ollama, "What pressure do I run my bike tyres at?", rows)
+        self.assertEqual(out[0]["file"], "/v/Bike.md")
+        self.assertTrue(out[0].get("reranked"))
+
 
 if __name__ == "__main__":
     unittest.main()

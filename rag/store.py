@@ -1,7 +1,8 @@
 """Chunk storage: Postgres + pgvector, or an in-memory store for tests and demos.
 
 Migrations here only ever add (CREATE ... IF NOT EXISTS, ADD COLUMN IF NOT
-EXISTS). Nothing is dropped, and each provider writes to its own table.
+EXISTS), and each provider writes to its own table. The one thing dropped is
+an old ivfflat vector index, replaced by HNSW; no data is ever dropped.
 """
 
 import math
@@ -10,10 +11,55 @@ import threading
 from datetime import datetime, timezone
 
 from .config import Settings
-from .notes import Chunk, note_name
+from .notes import Chunk, folder_prefix, matches_filters, note_name
 
 LINKED_CHUNKS_PER_NOTE = 2
 LINKED_CHUNKS_LIMIT = 10
+BACKLINK_CHUNKS_LIMIT = 5
+
+# BM25 parameters for the in-memory keyword index (the usual defaults).
+BM25_K1 = 1.2
+BM25_B = 0.75
+
+STOPWORDS = frozenset("""
+a about after again all am an and any are as at be because been before being both but by
+can could did do does doing down during each few for from further had has have having he
+her here hers him his how i if in into is it its itself just me more most my myself no nor
+not now of off on once only or other our ours out over own same she should so some such
+than that the their theirs them then there these they this those through to too under
+until up very was we were what when where which while who whom why will with would you
+your yours
+""".split())
+
+
+def keyword_terms(text: str) -> list[str]:
+    """Lowercase word tokens with stopwords dropped."""
+    return [w for w in re.findall(r"[a-z0-9_]+", text.lower()) if w not in STOPWORDS and len(w) > 1]
+
+
+def _stem(word: str) -> str:
+    """Plurals to singular for the memory index (tides -> tide, loaves stay).
+    Postgres's english stemmer goes further; this is enough for the tests
+    and the fixture eval."""
+    if len(word) <= 3 or word.isdigit():
+        return word
+    if word.endswith("ies") and len(word) > 4:
+        return word[:-3] + "y"
+    if word.endswith(("sses", "xes", "zes", "ches", "shes")):
+        return word[:-2]
+    if word.endswith("s") and not word.endswith(("ss", "us", "is")):
+        return word[:-1]
+    return word
+
+
+def _tsquery_words(query: str) -> list[str]:
+    """Query words for to_tsquery, built only from [a-z0-9], so no tsquery
+    syntax from the user ever reaches Postgres. Postgres's parser splits
+    `water_temp_c` into words, so do the same here."""
+    words = []
+    for term in keyword_terms(query):
+        words.extend(w for w in term.split("_") if len(w) > 1)
+    return list(dict.fromkeys(words))
 
 
 class DimensionMismatch(RuntimeError):
@@ -61,10 +107,10 @@ class PostgresStore:
                 raise
 
     def setup(self):
+        from psycopg2 import sql
+
         with self._lock, self.conn.cursor() as cur:
             cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
-            cur.execute("SELECT to_regclass(%s)", (self.table,))
-            exists = cur.fetchone()[0] is not None
             cur.execute(f"""
                 CREATE TABLE IF NOT EXISTS {self.table} (
                     id SERIAL PRIMARY KEY,
@@ -81,6 +127,15 @@ class PostgresStore:
             # Older `chunks` tables predate these columns.
             cur.execute(f"ALTER TABLE {self.table} ADD COLUMN IF NOT EXISTS backlinks TEXT[] DEFAULT '{{}}';")
             cur.execute(f"ALTER TABLE {self.table} ADD COLUMN IF NOT EXISTS heading TEXT;")
+            cur.execute(f"ALTER TABLE {self.table} ADD COLUMN IF NOT EXISTS tags TEXT[] DEFAULT '{{}}';")
+            # Full-text column for hybrid search: note name, section and text.
+            # Generated, so existing rows get it without re-embedding.
+            cur.execute(f"""
+                ALTER TABLE {self.table} ADD COLUMN IF NOT EXISTS tsv tsvector
+                GENERATED ALWAYS AS (to_tsvector('english',
+                    regexp_replace(file_path, '^.*/|\\.md$', '', 'g') || ' ' ||
+                    coalesce(heading, '') || ' ' || content)) STORED;
+            """)
             cur.execute("""
                 SELECT atttypmod FROM pg_attribute
                 WHERE attrelid = %s::regclass AND attname = 'embedding'
@@ -93,14 +148,33 @@ class PostgresStore:
                     f"provider makes {self.dim}-dim ones. Point CHUNKS_TABLE_"
                     f"{self.provider.upper()} at another table."
                 )
-            if not exists:
-                # HNSW works on an empty table; ivfflat needs data to train on.
-                cur.execute(f"""
-                    CREATE INDEX IF NOT EXISTS {self.table}_embedding_hnsw
-                    ON {self.table} USING hnsw (embedding vector_cosine_ops);
-                """)
+            # HNSW works on an empty table; ivfflat needs data to train on.
+            # The first `chunks` tables got an ivfflat index built while still
+            # empty, which finds only a few of the nearest rows once the
+            # planner uses it. Swap it for HNSW (an index only; rows stay).
+            cur.execute("""
+                SELECT i.relname, am.amname FROM pg_index x
+                JOIN pg_class i ON i.oid = x.indexrelid
+                JOIN pg_am am ON am.oid = i.relam
+                WHERE x.indrelid = %s::regclass AND am.amname IN ('hnsw', 'ivfflat')
+            """, (self.table,))
+            vector_indexes = cur.fetchall()
+            cur.execute("SELECT 1 FROM pg_am WHERE amname = 'hnsw'")
+            has_hnsw = cur.fetchone() is not None  # pgvector 0.5+; older keeps what it has
+            if has_hnsw:
+                if not any(am == "hnsw" for _, am in vector_indexes):
+                    cur.execute(f"""
+                        CREATE INDEX IF NOT EXISTS {self.table}_embedding_hnsw
+                        ON {self.table} USING hnsw (embedding vector_cosine_ops);
+                    """)
+                for name, am in vector_indexes:
+                    if am == "ivfflat":
+                        cur.execute(sql.SQL("DROP INDEX IF EXISTS {}").format(sql.Identifier(name)))
             cur.execute(f"""
                 CREATE INDEX IF NOT EXISTS {self.table}_file_path_idx ON {self.table} (file_path);
+            """)
+            cur.execute(f"""
+                CREATE INDEX IF NOT EXISTS {self.table}_tsv_idx ON {self.table} USING gin (tsv);
             """)
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS ingest_log (
@@ -124,11 +198,11 @@ class PostgresStore:
     def file_paths(self):
         return {r[0] for r in self._run("SELECT DISTINCT file_path FROM {t}", fetch=True)}
 
-    def replace_file(self, path, fhash, chunks: list[Chunk], embeddings, links):
+    def replace_file(self, path, fhash, chunks: list[Chunk], embeddings, links, tags=()):
         from psycopg2.extras import execute_values
 
         rows = [
-            (path, fhash, c.index, c.content, emb, links, c.heading)
+            (path, fhash, c.index, c.content, emb, links, c.heading, list(tags))
             for c, emb in zip(chunks, embeddings)
         ]
         with self._lock:
@@ -138,18 +212,23 @@ class PostgresStore:
                     execute_values(
                         cur,
                         f"""INSERT INTO {self.table}
-                            (file_path, file_hash, chunk_index, content, embedding, backlinks, heading)
+                            (file_path, file_hash, chunk_index, content, embedding, backlinks,
+                             heading, tags)
                             VALUES %s""",
                         rows,
-                        template=f"(%s, %s, %s, %s, %s::vector({self.dim}), %s, %s)",
+                        template=f"(%s, %s, %s, %s, %s::vector({self.dim}), %s, %s, %s::text[])",
                     )
                 self.conn.commit()
             except Exception:
                 self.conn.rollback()
                 raise
 
-    def update_links(self, path, links):
-        self._run("UPDATE {t} SET backlinks = %s WHERE file_path = %s", (links, path), commit=True)
+    def update_links(self, path, links, tags=None):
+        if tags is None:
+            self._run("UPDATE {t} SET backlinks = %s WHERE file_path = %s", (links, path), commit=True)
+        else:
+            self._run("UPDATE {t} SET backlinks = %s, tags = %s::text[] WHERE file_path = %s",
+                      (links, list(tags), path), commit=True)
 
     def delete_file(self, path):
         self._run("DELETE FROM {t} WHERE file_path = %s", (path,), commit=True)
@@ -167,16 +246,81 @@ class PostgresStore:
             for r in rows
         ]
 
-    def search(self, embedding, top_k, min_similarity):
-        vec = "[" + ",".join(f"{x:.7g}" for x in embedding) + "]"
-        rows = self._run("""
+    @staticmethod
+    def _filter_sql(filters):
+        """SQL and params for {"tags": [...], "folder": "..."}, as in matches_filters."""
+        sql, params = "", []
+        tags = [t.lstrip("#").lower() for t in (filters or {}).get("tags") or []]
+        if tags:
+            sql += """ AND EXISTS (SELECT 1 FROM UNNEST(tags) AS have, UNNEST(%s::text[]) AS want
+                                WHERE LOWER(have) = want
+                                   OR LEFT(LOWER(have), LENGTH(want) + 1) = want || '/')"""
+            params.append(tags)
+        folder = ((filters or {}).get("folder") or "").strip("/")
+        if folder:
+            prefix = folder_prefix((filters or {}).get("root"), folder)
+            if prefix is not None:
+                sql += " AND LEFT(LOWER(file_path), %s) = %s"
+                params += [len(prefix), prefix]
+            else:
+                sql += " AND STRPOS(LOWER(file_path), %s) > 0"
+                params.append(f"/{folder.lower()}/")
+        return sql, params
+
+    @staticmethod
+    def _vec(embedding):
+        return "[" + ",".join(f"{x:.7g}" for x in embedding) + "]"
+
+    def search(self, embedding, top_k, min_similarity, filters=None):
+        vec = self._vec(embedding)
+        where, params = self._filter_sql(filters)
+        # HNSW filters after the index scan, which only yields ef_search
+        # candidates (40 by default); a filter on a small folder or tag would
+        # then find almost nothing. Widen the scan for this transaction.
+        widen = "SET LOCAL hnsw.ef_search = 400;" if where else ""
+        rows = self._run(f"""{widen}
             SELECT file_path, content, backlinks, 1 - (embedding <=> %s::vector) AS similarity,
                    heading, chunk_index
-            FROM {t}
-            WHERE 1 - (embedding <=> %s::vector) > %s
+            FROM {{t}}
+            WHERE 1 - (embedding <=> %s::vector) > %s{where}
             ORDER BY embedding <=> %s::vector
             LIMIT %s
-        """, (vec, vec, min_similarity, vec, top_k), fetch=True)
+        """, (vec, vec, min_similarity, *params, vec, top_k), fetch=True)
+        return self._rows(rows)
+
+    def keyword_search(self, query, top_k, filters=None, embedding=None):
+        """Full-text match on any query word. Each word scores ts_rank with
+        length normalisation times the word's BM25 IDF over the table, so a
+        word in every note counts for less than a rare one (ts_rank alone has
+        no IDF). BM25-like, not exact BM25. `similarity` is the cosine to
+        `embedding` when given, so callers can show it."""
+        words = _tsquery_words(query)
+        if not words:
+            return []
+        where, params = self._filter_sql(filters)
+        if embedding is not None:
+            sim, sim_params = "1 - (embedding <=> %s::vector)", [self._vec(embedding)]
+        else:
+            sim, sim_params = "0.0", []
+        # One tsquery per stemmed word (weekly and week share one), dropping
+        # Postgres stopwords; the document counts use the GIN index.
+        rows = self._run(f"""
+            WITH q AS (
+                SELECT DISTINCT ON (tq::text) tq
+                FROM UNNEST(%s::text[]) AS w, to_tsquery('english', w) AS tq
+                WHERE numnode(tq) > 0
+            ), n AS (SELECT COUNT(*)::float8 AS n FROM {{t}}),
+            w AS (
+                SELECT q.tq, LN(1 + (n.n - d.df + 0.5) / (d.df + 0.5)) AS idf
+                FROM q, n, LATERAL (SELECT COUNT(*)::float8 AS df FROM {{t}} WHERE tsv @@ q.tq) d
+            )
+            SELECT file_path, content, backlinks, {sim} AS similarity, heading, chunk_index
+            FROM {{t}} c JOIN w ON c.tsv @@ w.tq
+            WHERE TRUE{where}
+            GROUP BY c.id
+            ORDER BY SUM(w.idf * ts_rank(c.tsv, w.tq, 1)) DESC, file_path, chunk_index
+            LIMIT %s
+        """, (words, *sim_params, *params, top_k), fetch=True)
         return self._rows(rows)
 
     def chunks_for_names(self, names, exclude_files=()):
@@ -191,6 +335,28 @@ class PostgresStore:
             ORDER BY file_path, chunk_index
             LIMIT {LINKED_CHUNKS_LIMIT}
         """, ([_note_key(n) for n in names], list(exclude_files)), fetch=True)
+        return self._rows(rows)
+
+    def backlink_chunks(self, names, exclude_files=(), limit=BACKLINK_CHUNKS_LIMIT):
+        """One chunk from each note that links to any of `names`: the first
+        chunk whose text mentions the name, else the note's first chunk."""
+        if not names:
+            return []
+        keys = [_note_key(n) for n in names]
+        rows = self._run(f"""
+            SELECT * FROM (
+                SELECT DISTINCT ON (file_path) file_path, content, backlinks, 0.0, heading, chunk_index
+                FROM {{t}}
+                WHERE EXISTS (SELECT 1 FROM UNNEST(backlinks) AS x WHERE LOWER(x) = ANY(%s))
+                  AND NOT (file_path = ANY(%s))
+                ORDER BY file_path,
+                         EXISTS (SELECT 1 FROM UNNEST(%s::text[]) AS n
+                                 WHERE STRPOS(LOWER(content), n) > 0) DESC,
+                         chunk_index
+            ) picked
+            ORDER BY file_path
+            LIMIT {int(limit)}
+        """, (keys, list(exclude_files), keys), fetch=True)
         return self._rows(rows)
 
     def links_of(self, path):
@@ -240,6 +406,7 @@ class MemoryStore:
         self.files: dict[str, dict] = {}
         self.log: list[dict] = []
         self._lock = threading.Lock()
+        self._bm25 = None  # keyword index, rebuilt on the first search after a change
 
     def setup(self):
         pass
@@ -254,36 +421,91 @@ class MemoryStore:
     def file_paths(self):
         return set(self.files)
 
-    def replace_file(self, path, fhash, chunks, embeddings, links):
+    def replace_file(self, path, fhash, chunks, embeddings, links, tags=()):
         with self._lock:
             self.files[path] = {
                 "hash": fhash,
                 "links": list(links),
+                "tags": list(tags),
                 "chunks": [(c, _unit(e)) for c, e in zip(chunks, embeddings)],
             }
+            self._bm25 = None
 
-    def update_links(self, path, links):
+    def update_links(self, path, links, tags=None):
         if path in self.files:
             self.files[path]["links"] = list(links)
+            if tags is not None:
+                self.files[path]["tags"] = list(tags)
 
     def delete_file(self, path):
         with self._lock:
             self.files.pop(path, None)
+            self._bm25 = None
 
     def _row(self, path, chunk, similarity):
         return {"file": path, "content": chunk.content, "links": list(self.files[path]["links"]),
                 "similarity": similarity, "heading": chunk.heading, "chunk_index": chunk.index}
 
-    def search(self, embedding, top_k, min_similarity):
+    def _passes(self, path, filters):
+        return matches_filters(path, self.files[path].get("tags", []), filters)
+
+    def search(self, embedding, top_k, min_similarity, filters=None):
         q = _unit(embedding)
         scored = []
         for path, f in list(self.files.items()):
+            if not self._passes(path, filters):
+                continue
             for chunk, vec in f["chunks"]:
                 sim = sum(a * b for a, b in zip(q, vec))
                 if sim > min_similarity:
                     scored.append((sim, path, chunk))
         scored.sort(key=lambda s: -s[0])
         return [self._row(p, c, s) for s, p, c in scored[:top_k]]
+
+    def _keyword_index(self):
+        with self._lock:
+            if self._bm25 is None:
+                docs = []
+                for path, f in self.files.items():
+                    for chunk, vec in f["chunks"]:
+                        text = f"{note_name(path)} {chunk.heading or ''} {chunk.content}"
+                        terms = [_stem(t) for t in keyword_terms(text)]
+                        counts: dict[str, int] = {}
+                        for t in terms:
+                            counts[t] = counts.get(t, 0) + 1
+                        docs.append((path, chunk, vec, counts, len(terms)))
+                df: dict[str, int] = {}
+                for doc in docs:
+                    for t in doc[3]:
+                        df[t] = df.get(t, 0) + 1
+                avg = sum(doc[4] for doc in docs) / len(docs) if docs else 0.0
+                self._bm25 = (docs, df, avg)
+            return self._bm25
+
+    def keyword_search(self, query, top_k, filters=None, embedding=None):
+        """BM25 over note name, heading and chunk text."""
+        terms = list(dict.fromkeys(_stem(t) for t in keyword_terms(query)))
+        if not terms:
+            return []
+        docs, df, avg = self._keyword_index()
+        n = len(docs)
+        q = _unit(embedding) if embedding is not None else None
+        scored = []
+        for path, chunk, vec, counts, length in docs:
+            if path not in self.files or not self._passes(path, filters):
+                continue
+            score = 0.0
+            for t in terms:
+                tf = counts.get(t)
+                if not tf:
+                    continue
+                idf = math.log(1 + (n - df[t] + 0.5) / (df[t] + 0.5))
+                score += idf * tf * (BM25_K1 + 1) / (tf + BM25_K1 * (1 - BM25_B + BM25_B * length / avg))
+            if score > 0:
+                sim = sum(a * b for a, b in zip(q, vec)) if q is not None else 0.0
+                scored.append((score, path, chunk, sim))
+        scored.sort(key=lambda s: (-s[0], s[1], s[2].index))
+        return [{**self._row(p, c, sim), "keyword_score": score} for score, p, c, sim in scored[:top_k]]
 
     def chunks_for_names(self, names, exclude_files=()):
         wanted = {_note_key(n) for n in names}
@@ -294,6 +516,20 @@ class MemoryStore:
             for chunk, _ in self.files[path]["chunks"][:LINKED_CHUNKS_PER_NOTE]:
                 out.append(self._row(path, chunk, 0.0))
         return out[:LINKED_CHUNKS_LIMIT]
+
+    def backlink_chunks(self, names, exclude_files=(), limit=BACKLINK_CHUNKS_LIMIT):
+        keys = [_note_key(n) for n in names]
+        out = []
+        for path in sorted(self.files):
+            f = self.files[path]
+            if path in exclude_files or not f["chunks"]:
+                continue
+            if not {_note_key(x) for x in f["links"]} & set(keys):
+                continue
+            chunk = next((c for c, _ in f["chunks"] if any(k in c.content.lower() for k in keys)),
+                         f["chunks"][0][0])
+            out.append(self._row(path, chunk, 0.0))
+        return out[:limit]
 
     def links_of(self, path):
         f = self.files.get(path)

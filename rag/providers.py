@@ -106,6 +106,26 @@ class Ollama:
         with self._open("/api/chat", body) as r:
             yield from strip_think(_ollama_tokens(r))
 
+    def chat_json(self, system: str, prompt: str, schema: dict, timeout=None) -> dict:
+        """One non-streamed reply constrained to a JSON schema (used by rerank)."""
+        body = {
+            "model": self.chat_model,
+            "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+            "stream": False,
+            "think": False,
+            "format": schema,
+            "options": {"num_ctx": self.num_ctx, "temperature": 0},
+        }
+        with self._open("/api/chat", body, timeout=timeout, retries=0) as r:
+            reply = json.load(r)
+        if reply.get("error"):
+            raise ProviderUnavailable(f"Ollama: {reply['error']}")
+        text = "".join(strip_think(iter([reply.get("message", {}).get("content", "")])))
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError as e:
+            raise ProviderUnavailable("Ollama sent a reply this app can't read.") from e
+
 
 def _lines(response):
     try:

@@ -9,6 +9,7 @@ from rich.console import Console
 from rich.table import Table
 
 from rag.config import add_common_args, settings_from_args
+from rag.notes import note_name
 from rag.pipeline import Timer, answer, ingest_vault, retrieve
 from rag.providers import ProviderUnavailable, make_provider
 from rag.store import MemoryStore, make_store
@@ -44,6 +45,28 @@ def score_keywords(keywords, text):
     return hits, misses, score
 
 
+def score_sources(expected, retrieved):
+    """Note-level retrieval metrics.
+
+    `retrieved` is the list of note names in the order they reach the model
+    (duplicates allowed). Returns recall (share of expected notes present),
+    the same within the first three notes, reciprocal rank of the first expected note, and whether the top note is
+    an expected one.
+    """
+    order = list(dict.fromkeys(name.lower() for name in retrieved))
+    wanted = {name.lower() for name in expected}
+    if not wanted:
+        return {"recall": None, "recall3": None, "rr": None, "hit1": None}
+    found = wanted & set(order)
+    rank = next((i for i, name in enumerate(order, start=1) if name in wanted), None)
+    return {
+        "recall": len(found) / len(wanted),
+        "recall3": len(wanted & set(order[:3])) / len(wanted),
+        "rr": 1 / rank if rank else 0.0,
+        "hit1": bool(order) and order[0] in wanted,
+    }
+
+
 def load_questions(path):
     with open(path, encoding="utf-8") as f:
         return json.load(f)
@@ -59,12 +82,18 @@ def run_eval(store, provider, settings, questions, retrieval_only=False):
         console.print(f"\n[bold][{i}/{len(questions)}][/bold] {question}")
 
         timer = Timer()
-        chunks = retrieve(store, provider, question, settings.top_k, settings.threshold)
+        chunks = retrieve(store, provider, question, settings.top_k, settings.threshold,
+                          filters=item.get("filters"), **settings.retrieval_options())
         retrieval_ms = timer.ms()
         context_text = "\n".join(chunk["content"] for chunk in chunks)
         retrieval_hits, retrieval_misses, retrieval_score = score_keywords(
             keywords, context_text
         )
+        expected_sources = item.get("expected_sources", [])
+        source_scores = score_sources(expected_sources, [note_name(c["file"]) for c in chunks])
+        abstained = None
+        if item.get("type") == "abstain":
+            abstained = not any(not c.get("via_link") for c in chunks)
 
         if not chunks:
             console.print("[red]  No chunks retrieved[/red]")
@@ -74,6 +103,13 @@ def run_eval(store, provider, settings, questions, retrieval_only=False):
             )
             console.print(f"[dim]  Sources: {sources}[/dim]")
 
+        if source_scores["recall"] is not None:
+            console.print(
+                f"  Sources:   [cyan]{source_scores['recall']:.0%}[/cyan] recall, "
+                f"rank of first expected {round(1 / source_scores['rr']) if source_scores['rr'] else '-'}"
+            )
+        if abstained is not None:
+            console.print(f"  Abstained: {'[green]yes' if abstained else '[red]no'}[/]")
         console.print(
             f"  Retrieval: [cyan]{retrieval_score:.0%}[/cyan] "
             f"({len(retrieval_hits)}/{len(keywords)} keywords)"
@@ -109,6 +145,10 @@ def run_eval(store, provider, settings, questions, retrieval_only=False):
 
         results.append({
             "question": question,
+            "type": item.get("type", "fact"),
+            "expected_sources": expected_sources,
+            **{f"source_{k}": v for k, v in source_scores.items()},
+            "abstained": abstained,
             "retrieval_score": retrieval_score,
             "answer_score": answer_score,
             "retrieval_misses": retrieval_misses,
@@ -123,43 +163,95 @@ def run_eval(store, provider, settings, questions, retrieval_only=False):
     return results
 
 
-def print_summary(results, retrieval_only=False):
-    avg_retrieval = sum(r["retrieval_score"] for r in results) / len(results)
-    avg_answer = None
-    if not retrieval_only:
-        avg_answer = sum(r["answer_score"] for r in results) / len(results)
+def _mean(values):
+    values = [v for v in values if v is not None]
+    return sum(values) / len(values) if values else None
 
-    table = Table(title="Eval Summary")
+
+def summarize(results, retrieval_only=False):
+    """Averages over the scored questions. Abstain cases (no expected notes)
+    only count towards the abstain rate."""
+    scored = [r for r in results if r["type"] != "abstain"]
+    abstain = [r for r in results if r["type"] == "abstain"]
+    summary = {
+        "questions": len(results),
+        "source_recall": _mean(r["source_recall"] for r in scored),
+        "source_recall_at_3": _mean(r["source_recall3"] for r in scored),
+        "source_mrr": _mean(r["source_rr"] for r in scored),
+        "hit_at_1": _mean(r["source_hit1"] for r in scored),
+        "all_sources_found": _mean(r["source_recall"] == 1.0 for r in scored if r["source_recall"] is not None),
+        "keyword_retrieval": _mean(r["retrieval_score"] for r in scored),
+        "abstain_rate": _mean(r["abstained"] for r in abstain),
+        "avg_chunks": _mean(r["chunk_count"] for r in results),
+        "median_retrieval_ms": median(r["retrieval_ms"] for r in results),
+        "by_type": {},
+    }
+    if not retrieval_only:
+        summary["answer"] = _mean(r["answer_score"] for r in scored)
+        summary["median_answer_ms"] = median(r["answer_ms"] for r in results)
+    for kind in dict.fromkeys(r["type"] for r in scored):
+        group = [r for r in scored if r["type"] == kind]
+        summary["by_type"][kind] = {
+            "n": len(group),
+            "source_recall": _mean(r["source_recall"] for r in group),
+            "source_recall_at_3": _mean(r["source_recall3"] for r in group),
+            "source_mrr": _mean(r["source_rr"] for r in group),
+        }
+    return summary
+
+
+def _pct(value):
+    return "-" if value is None else f"{value:.0%}"
+
+
+def _num(value):
+    return "-" if value is None else f"{value:.2f}"
+
+
+def print_summary(results, retrieval_only=False):
+    table = Table(title="Eval summary")
     table.add_column("#", style="dim")
+    table.add_column("Type")
     table.add_column("Question", max_width=50)
-    table.add_column("Retrieval", justify="right")
+    table.add_column("Source recall", justify="right")
+    table.add_column("Keywords", justify="right")
     if not retrieval_only:
         table.add_column("Answer", justify="right")
 
     for i, result in enumerate(results, start=1):
-        row = [
-            str(i),
-            result["question"][:50],
-            f"{result['retrieval_score']:.0%}",
-        ]
+        if result["type"] == "abstain":
+            recall = "abstained" if result["abstained"] else "answered"
+        else:
+            recall = _pct(result["source_recall"])
+        row = [str(i), result["type"], result["question"][:50], recall,
+               "-" if result["type"] == "abstain" else _pct(result["retrieval_score"])]
         if not retrieval_only:
-            row.append(f"{result['answer_score']:.0%}")
+            row.append("-" if result["type"] == "abstain" else _pct(result["answer_score"]))
         table.add_row(*row)
 
+    summary = summarize(results, retrieval_only)
     console.print()
     console.print(table)
     console.print(
-        f"\n[bold]Average retrieval:[/bold] {avg_retrieval:.0%} "
-        f"({sum(1 for r in results if r['retrieval_score'] == 1.0)}/{len(results)} perfect)"
+        f"\n[bold]Source recall:[/bold] {_pct(summary['source_recall'])}  "
+        f"[bold]@3:[/bold] {_pct(summary['source_recall_at_3'])}  "
+        f"[bold]MRR:[/bold] {_num(summary['source_mrr'])}  "
+        f"[bold]Hit@1:[/bold] {_pct(summary['hit_at_1'])}  "
+        f"[bold]All sources found:[/bold] {_pct(summary['all_sources_found'])}"
     )
-    if avg_answer is not None:
-        console.print(
-            f"[bold]Average answer:[/bold]    {avg_answer:.0%} "
-            f"({sum(1 for r in results if r['answer_score'] == 1.0)}/{len(results)} perfect)"
-        )
-    console.print(f"[bold]Median retrieval latency:[/bold] {median(r['retrieval_ms'] for r in results)} ms")
-    if avg_answer is not None:
-        console.print(f"[bold]Median answer latency:[/bold]    {median(r['answer_ms'] for r in results)} ms")
+    console.print(f"[bold]Keyword retrieval:[/bold] {_pct(summary['keyword_retrieval'])}  "
+                  f"[bold]Abstain:[/bold] {_pct(summary['abstain_rate'])}  "
+                  f"[bold]Chunks per question:[/bold] {_num(summary['avg_chunks'])}")
+    for kind, group in summary["by_type"].items():
+        console.print(f"  {kind:<11} n={group['n']:<3} recall {_pct(group['source_recall'])}  "
+                      f"@3 {_pct(group['source_recall_at_3'])}  "
+                      f"MRR {_num(group['source_mrr'])}")
+    if "answer" in summary:
+        console.print(f"[bold]Answer keywords:[/bold] {_pct(summary['answer'])}")
+    console.print(f"[bold]Median retrieval latency:[/bold] {summary['median_retrieval_ms']} ms")
+    if "median_answer_ms" in summary:
+        console.print(f"[bold]Median answer latency:[/bold]    {summary['median_answer_ms']} ms")
+    return summary
 
 
 def median(values):
@@ -188,14 +280,25 @@ def main():
              "(handy for the small fixture vault)",
     )
     parser.add_argument("--json-out", type=Path, help="Also write per-question results as JSON")
+    parser.add_argument("--retrieval", choices=("hybrid", "vector"), help="Overrides RAG_RETRIEVAL")
+    parser.add_argument("--chunking", choices=("heading", "window"), help="Overrides RAG_CHUNKING")
+    parser.add_argument("--backlinks", action=argparse.BooleanOptionalAction,
+                        help="Overrides RAG_BACKLINKS")
+    parser.add_argument("--rerank", action=argparse.BooleanOptionalAction, help="Overrides RAG_RERANK")
+    parser.add_argument("--top-k", type=int, help="Overrides RAG_TOP_K")
     args = parser.parse_args()
     settings = settings_from_args(args)
+    for name in ("retrieval", "chunking", "backlinks", "rerank", "top_k"):
+        if getattr(args, name) is not None:
+            setattr(settings, name, getattr(args, name))
 
     questions = load_questions(args.questions)
     console.print(
         f"\n[bold green]Eval harness[/bold green] — {len(questions)} questions, "
         f"{settings.provider} provider"
     )
+    console.print(f"[dim]retrieval={settings.retrieval} chunking={settings.chunking} "
+                  f"backlinks={settings.backlinks} rerank={settings.rerank} top_k={settings.top_k}[/dim]")
     if args.retrieval_only:
         console.print("[dim]Retrieval-only mode (no LLM calls)[/dim]")
 
@@ -206,7 +309,8 @@ def main():
                 sys.exit("--memory needs VAULT_PATH or --vault")
             store = MemoryStore(settings)
             timer = Timer()
-            ingest_vault(store, provider, settings.vault_root, log=lambda *_: None)
+            ingest_vault(store, provider, settings.vault_root, log=lambda *_: None,
+                         chunking=settings.chunking)
             console.print(f"[dim]Indexed {store.stats()['chunks']} chunks in {timer.ms()} ms[/dim]")
         else:
             store = make_store(settings)
@@ -214,9 +318,13 @@ def main():
         results = run_eval(store, provider, settings, questions, retrieval_only=args.retrieval_only)
     except ProviderUnavailable as e:
         sys.exit(f"❌ {e}")
-    print_summary(results, retrieval_only=args.retrieval_only)
+    summary = print_summary(results, retrieval_only=args.retrieval_only)
     if args.json_out:
-        args.json_out.write_text(json.dumps({"provider": settings.provider, "results": results}, indent=2))
+        args.json_out.write_text(json.dumps(
+            {"provider": settings.provider, "config": {
+                "retrieval": settings.retrieval, "chunking": settings.chunking,
+                "backlinks": settings.backlinks, "rerank": settings.rerank, "top_k": settings.top_k},
+             "summary": summary, "results": results}, indent=2))
     store.close()
 
 
