@@ -159,14 +159,17 @@ class PostgresStore:
                 WHERE x.indrelid = %s::regclass AND am.amname IN ('hnsw', 'ivfflat')
             """, (self.table,))
             vector_indexes = cur.fetchall()
-            if not any(am == "hnsw" for _, am in vector_indexes):
-                cur.execute(f"""
-                    CREATE INDEX IF NOT EXISTS {self.table}_embedding_hnsw
-                    ON {self.table} USING hnsw (embedding vector_cosine_ops);
-                """)
-            for name, am in vector_indexes:
-                if am == "ivfflat":
-                    cur.execute(sql.SQL("DROP INDEX IF EXISTS {}").format(sql.Identifier(name)))
+            cur.execute("SELECT 1 FROM pg_am WHERE amname = 'hnsw'")
+            has_hnsw = cur.fetchone() is not None  # pgvector 0.5+; older keeps what it has
+            if has_hnsw:
+                if not any(am == "hnsw" for _, am in vector_indexes):
+                    cur.execute(f"""
+                        CREATE INDEX IF NOT EXISTS {self.table}_embedding_hnsw
+                        ON {self.table} USING hnsw (embedding vector_cosine_ops);
+                    """)
+                for name, am in vector_indexes:
+                    if am == "ivfflat":
+                        cur.execute(sql.SQL("DROP INDEX IF EXISTS {}").format(sql.Identifier(name)))
             cur.execute(f"""
                 CREATE INDEX IF NOT EXISTS {self.table}_file_path_idx ON {self.table} (file_path);
             """)

@@ -186,3 +186,80 @@ I stopped the API server (port 8797) I started. No containers were created (dock
 4. **Rerank on your vault?** Off by default (+600 ms for one question gained here). Try `--rerank` on your questions. A: leave it off · B: turn it on if it helps there.
 5. **Abstain is 0%.** Off-topic questions ("passport number") still score above the 0.5 local threshold and get an answer built from loosely related notes. That's a threshold or prompt question for another day.
 6. **Cloud baseline wasn't run** (no keys here). Run the eval with `--provider cloud` once to record it.
+
+## Decisions applied 2026-10-30
+
+Overnight run on `pc`, local branch `ov/rag`, pushed to `hybrid-retrieval`. Decision numbers are from the 2026-10-29 morning digest.
+
+### Decision 36A: accept that the first ingest re-embeds every note (no code change)
+
+The README's ingest step now says so: the first ingest after upgrading re-embeds every note once (the stored hash records the chunking mode), which on the cloud provider means Voyage calls for the whole vault; later ingests skip unchanged notes; `RAG_CHUNKING=window` puts it off. Seen for real tonight: on a table filled by `web-and-local`, this branch's ingest rewrote all 26 notes (28 chunks became 41), and a second run wrote 0. Commit `b0aede3`.
+
+### Decision 37A: rerank stays off by default (no change)
+
+`RAG_RERANK` still defaults to `0`. Nothing changed.
+
+### Postgres: first real run
+
+A scratch `pgvector/pgvector:pg16` container (`rag-ov-rag-pg`, port 55471), psycopg2 from `uv run --with psycopg2-binary`, fixture vault only, local provider (Ollama on pc).
+
+**Migration on tables that already have data.** Two cases, both with rows in them before this branch's `setup()` ran:
+
+- `chunks_nomic_768` filled by the real `web-and-local` code (exported with `git archive`, ingested the fixture vault: 28 rows).
+- A `chunks` table in `main`'s schema (1024 dims, no `heading` column, ivfflat index), 28 rows with the fixture text.
+
+On both, `setup()` added `heading`, `tags` and the generated `tsv` column, filled `tsv` for every existing row (28/28, none empty), set `tags` to `{}`, built the GIN index, and running it a second time changed nothing. Keyword search on the migrated rows worked straight away (`gochugaru` finds Kimchi), with no re-embedding. The `ADD COLUMN ... GENERATED ... STORED` rewrite was instant at this size.
+
+**What broke, and the fixes** (commit `40fcaa7` plus a guard in the final commit):
+
+1. **Common words drowned out rare ones in Postgres keyword search.** `ts_rank` has no IDF, and the english stemmer turns "weekly" into "week", which is in every section heading of the six-week course note. For "What questions do I ask in the weekly review?" the keyword list was Weekly Review and then seven course sections; the memory store's BM25 gave Weekly Review and the Harbour Authority call. Each query word now gets its own tsquery, weighted by its BM25 IDF over the table (`ln(1 + (N - df + 0.5) / (df + 0.5))`, counts via the GIN index), and the per-word `ts_rank(..., 1)` scores are summed. Still BM25-like, not exact BM25.
+2. **`main`'s ivfflat index barely works.** `main` created it in `setup()` while `chunks` was empty, so it trained on nothing. Rebuilt the same way with the real nomic vectors, an index scan asked for 20 neighbours returned 1 to 5. On a vault-sized table the planner uses that index, so cloud vector search has probably been missing most matches. `setup()` now adds an HNSW index if the table has none and drops the ivfflat one: an index, not rows. If pgvector is older than 0.5 (no HNSW), it leaves the indexes alone. On Bazil's real `chunks` table the next ingest builds the HNSW index once (it takes a moment and blocks writes while it runs).
+3. Nothing else failed: placeholders, `DISTINCT ON` in `backlink_chunks`, `SET LOCAL hnsw.ef_search` for filtered searches, tag and folder filters, `ingest_log`, all ran fine.
+
+**New tests.** `tests/test_postgres.py`, 10 tests, skipped unless `RAG_TEST_PG_DSN` is set. They migrate filled tables in `main`'s and `web-and-local`'s schemas (and check vector search through the index with seq scans off), ingest the fixture vault, and check that Postgres matches the memory store on stats, links, backlinks, linked chunks and keyword ranking, plus filters, tags and hybrid retrieval. The IDF test and the ivfflat test both failed before the fixes.
+
+**Eval on Postgres** (fixture vault, local provider, new defaults, 57 questions, with answers):
+
+| | Memory store | Postgres before fix | Postgres after fix |
+|---|---|---|---|
+| Source recall / @3 | 100% / 97% | 100% / 97% | 100% / 97% |
+| MRR / hit@1 | 0.97 / 95% | 0.97 / 95% | 0.97 / 95% |
+| Keyword retrieval | 98% | 98% | 98% |
+| Answer keywords | 96% | 93% | 97% |
+| Chunks per question | 7.16 | 6.84 | 6.98 |
+| Same source set as memory | | 44/57 | 47/57 |
+| Same source order as memory | | 33/57 | 43/57 |
+| Median retrieval / answer | 18 / 745 ms | 37 / 786 ms | 16 / 724 ms |
+
+The ranking metrics were already at the ceiling on this small vault, so the fix shows up as Postgres agreeing with the measured memory store more often, not as a higher MRR. Answer keywords move by a question or two between runs (qwen3 noise). The 37 ms is from the first run, with the Postgres cache cold.
+
+Left as is: the english stemmer still folds "weekly" into "week", so the weekly review question still pulls course sections into its top five on Postgres (they're also the vector side's next-best hits). That's the stemmer working as designed; the memory store's plural-only stemmer doesn't do it.
+
+### Checks run
+
+- `python3 -m unittest discover -s tests -t .`: 101 tests, OK (13 skipped: 3 live, 10 Postgres).
+- `tests.test_postgres` against the scratch container: 10 tests, OK.
+- `python3 -m tests.live`: 5 tests, OK, against Ollama on pc.
+- Full eval on Postgres and on the memory store, as in the table. Logs and JSON: `/data/tmp/overnight-2026-10-30/scratch/rag/eval-*.{log,json}`.
+- Sentence case (decision 3A): the web app has no uppercase or letter-spaced labels. No UI changed tonight.
+- Self-review of tonight's diff: added the pgvector < 0.5 guard above. Nothing else found.
+
+How to rerun the Postgres check:
+
+```bash
+docker run -d --name rag-pg-test -e POSTGRES_USER=rag -e POSTGRES_PASSWORD=rag -e POSTGRES_DB=rag_test \
+  -p 127.0.0.1:55432:5432 pgvector/pgvector:pg16
+RAG_TEST_PG_DSN="host=127.0.0.1 port=55432 dbname=rag_test user=rag password=rag" \
+  uv run --no-project --with psycopg2-binary python -m unittest tests.test_postgres
+docker rm -f rag-pg-test
+```
+
+### Cleanup
+
+Removed the container `rag-ov-rag-pg` (no volume was named, so its anonymous volume went with `docker rm -v`). No servers left running.
+
+### Needs Bazil (updated 2026-10-30)
+
+1. **Your cloud `chunks` table gets a new vector index on the next ingest.** The old ivfflat index is swapped for HNSW (an index only, rows stay). Expect the first ingest to pause while it builds. Cloud answers may find noticeably more matching notes afterwards; that's the fix, not a regression.
+2. **Run the eval on your real questions** (still open from 2026-10-29), now that the Postgres path has run: `python eval.py` with the defaults, then `--retrieval vector --chunking window --no-backlinks`.
+3. **Abstain is 0%** and **the cloud baseline wasn't run** (no keys here): both unchanged from 2026-10-29.
