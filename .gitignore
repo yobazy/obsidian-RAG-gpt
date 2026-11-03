@@ -6,3 +6,9 @@ __pycache__/
 # Personal eval questions (write your own from eval/questions.example.json)
 eval/questions.json
 .DS_Store
+
+# Web app
+web/node_modules/
+web/dist/
+scratch/
+web/*.tsbuildinfo

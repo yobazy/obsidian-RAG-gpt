@@ -1,0 +1,10 @@
+# Cloud provider (Voyage AI + Claude)
+anthropic
+voyageai
+# Postgres index
+psycopg2-binary
+# CLI scripts
+rich
+python-dotenv
+watchdog
+# Local provider, the web API server and the tests use only the standard library.
