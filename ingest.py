@@ -20,7 +20,7 @@ def main():
     store.setup()
     print(f"✅ DB ready ({settings.provider} provider, table {store.table})")
     try:
-        ingest_vault(store, make_provider(settings), settings.vault_root)
+        ingest_vault(store, make_provider(settings), settings.vault_root, chunking=settings.chunking)
     except ProviderUnavailable as e:
         sys.exit(f"❌ {e}")
     finally:

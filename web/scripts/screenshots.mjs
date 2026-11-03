@@ -1,12 +1,12 @@
 // Screenshots of the running app (point it at the fixture vault, never real notes).
-//   node scripts/screenshots.mjs [outDir] [baseUrl]
+//   node scripts/screenshots.mjs [outDir] [baseUrl] [question]
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { chromium, devices } from "playwright";
 
 const outDir = process.argv[2] ?? "screenshots";
 const base = process.argv[3] ?? "http://127.0.0.1:5190";
-const question = "What hydration did I settle on for the weekend loaf, and why?";
+const question = process.argv[4] ?? "What hydration did I settle on for the weekend loaf, and why?";
 mkdirSync(outDir, { recursive: true });
 
 const browser = await chromium.launch();

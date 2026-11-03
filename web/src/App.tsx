@@ -295,7 +295,11 @@ function SourceCard({
       <div className="source-top">
         <span className="source-n">{source.n}</span>
         <span className="source-score">
-          {source.via_link ? "Linked note" : `${Math.round((source.score ?? 0) * 100)}% match`}
+          {source.via === "backlink"
+            ? "Links here"
+            : source.via_link
+              ? "Linked note"
+              : `${Math.round((source.score ?? 0) * 100)}% match`}
         </span>
       </div>
       <button className="source-title" onClick={() => onOpen(source.path)}>

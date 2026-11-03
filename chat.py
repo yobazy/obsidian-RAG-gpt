@@ -27,7 +27,8 @@ def chat(store, provider, settings):
             break
 
         try:
-            chunks = retrieve(store, provider, query, settings.top_k, settings.threshold)
+            chunks = retrieve(store, provider, query, settings.top_k, settings.threshold,
+                              **settings.retrieval_options())
             console.print("\n[bold magenta]Assistant[/bold magenta]")
             text = ""
             with Live(Markdown(""), console=console, refresh_per_second=8) as live:

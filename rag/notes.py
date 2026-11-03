@@ -7,6 +7,10 @@ from pathlib import Path
 
 CHUNK_SIZE = 400
 CHUNK_OVERLAP = 50
+# Heading-aware chunking: sections shorter than this many words are merged
+# into the next one, so a heading with one line under it isn't a chunk alone.
+MIN_SECTION_WORDS = 25
+CHUNKING_MODES = ("heading", "window")
 
 _CODE_BLOCK = re.compile(r"```.*?```", re.DOTALL)
 _HEADING = re.compile(r"^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$")
@@ -19,6 +23,14 @@ class Chunk:
     index: int
     content: str
     heading: str | None
+    # What gets embedded and keyword-indexed: the content with the note title
+    # and section in front, so a section chunk still says what note it is from.
+    # Empty means the same as content.
+    context: str = ""
+
+    @property
+    def index_text(self) -> str:
+        return self.context or self.content
 
 
 def file_hash(path) -> str:
@@ -104,14 +116,66 @@ def embed_text(text: str) -> str:
     return body
 
 
-def chunk_note(text: str, chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP) -> list[Chunk]:
-    """Overlapping word windows over the cleaned note.
+def chunk_note(text: str, chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP,
+               mode="heading", title=None) -> list[Chunk]:
+    """Split a note into chunks.
 
-    Each chunk carries the heading in effect where it starts (or, for the
-    opening chunk, the first heading inside it), so answers can cite a
-    section and not only a file.
+    `window`: overlapping word windows over the whole note. Each chunk carries
+    the heading in effect where it starts (or, for the opening chunk, the
+    first heading inside it).
+
+    `heading`: one chunk per section (split at every heading), with long
+    sections cut into the same overlapping windows and short ones merged
+    into the next section. Each chunk's index text starts with the note title
+    and section, e.g. "Weekend Loaf > Lessons".
     """
     pairs = list(_words_with_headings(embed_text(text)))
+    if mode == "window":
+        return _windows(pairs, chunk_size, overlap)
+    if mode != "heading":
+        raise ValueError(f"chunking must be one of {CHUNKING_MODES}, got {mode!r}")
+
+    if len(pairs) <= chunk_size:
+        # A note that fits in one chunk stays whole: splitting a short note
+        # only crowds the top results with several pieces of it (measured,
+        # see docs/PROGRESS-hybrid.md). No title prefix either: it measured
+        # worse, and the note's own "# Title" line is usually in the text.
+        return _windows(pairs, chunk_size, overlap)
+
+    sections: list[list[tuple[str, str | None]]] = []
+    for pair in pairs:
+        if not sections or pair[1] != sections[-1][-1][1]:
+            sections.append([])
+        sections[-1].append(pair)
+    merged: list[list[tuple[str, str | None]]] = []
+    carry: list = []
+    for section in sections:
+        # Carried words take the heading of the section they join, so a
+        # one-line intro doesn't relabel the section after it.
+        section = [(w, section[0][1]) for w, _ in carry] + section
+        if len(section) < MIN_SECTION_WORDS:
+            carry = section
+            continue
+        carry = []
+        merged.append(section)
+    if carry:
+        if merged:
+            merged[-1].extend((w, merged[-1][-1][1]) for w, _ in carry)
+        else:
+            merged.append(carry)
+
+    chunks = []
+    for section in merged:
+        for piece in _windows(section, chunk_size, overlap):
+            label = title or ""
+            if piece.heading and piece.heading != title:
+                label = f"{title} > {piece.heading}" if title else piece.heading
+            chunks.append(Chunk(len(chunks), piece.content, piece.heading,
+                                f"{label}\n{piece.content}" if label else ""))
+    return chunks
+
+
+def _windows(pairs, chunk_size, overlap) -> list[Chunk]:
     chunks = []
     start = 0
     while start < len(pairs):
@@ -123,6 +187,87 @@ def chunk_note(text: str, chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP) -> list[
             break
         start += chunk_size - overlap
     return chunks
+
+
+_INLINE_TAG = re.compile(r"(?:(?<=\s)|^)#([A-Za-z][\w/-]*)")
+
+
+def note_tags(meta: dict, body: str = "") -> list[str]:
+    """Frontmatter tags plus inline #tags in the body (outside code), lowercased,
+    without a leading #, duplicates dropped."""
+    tags = meta.get("tags") or meta.get("tag") or []
+    if isinstance(tags, str):
+        tags = [t for t in re.split(r"[,\s]+", tags) if t]
+    out = [str(t).strip().lstrip("#").lower() for t in tags if str(t).strip().lstrip("#")]
+    body = re.sub(r"`[^`\n]*`", "", _CODE_BLOCK.sub("", body))
+    out += [t.lower().rstrip("/-") for t in _INLINE_TAG.findall(body)]
+    return list(dict.fromkeys(t for t in out if t))
+
+
+# Inline filters in a question: #tag, tag:name, in:Folder, folder:"Two Words".
+_FILTER = re.compile(
+    r"""(?:(?<=\s)|^)(?:\#(?P<hash>[A-Za-z][\w/-]*)"""
+    r"""|(?P<key>tag|in|folder):(?:"(?P<quoted>[^"]+)"|(?P<bare>[^\s"]*[^\s"?.,;:!)])))"""
+)
+
+
+def parse_filters(query: str) -> tuple[str, dict]:
+    """Pull inline filters out of a question.
+
+    Returns (question without the filters, {"tags": [...], "folder": "..."}).
+    Tags match any-of and include nested tags (#book matches #book/fiction).
+    """
+    tags, folder = [], None
+
+    def take(match):
+        nonlocal folder
+        if match.group("hash"):
+            tags.append(match.group("hash").lower())
+        elif match.group("key") == "tag":
+            tags.append((match.group("quoted") or match.group("bare")).lstrip("#").lower())
+        else:
+            folder = (match.group("quoted") or match.group("bare")).strip("/")
+        return ""
+
+    cleaned = re.sub(r"\s{2,}", " ", _FILTER.sub(take, query))
+    cleaned = re.sub(r"\s+([?.,;:!])", r"\1", cleaned).strip()
+    filters = {}
+    if tags:
+        filters["tags"] = tags
+    if folder:
+        filters["folder"] = folder
+    return (cleaned or query), filters
+
+
+def matches_filters(path: str, tags, filters: dict | None) -> bool:
+    """Whether a note passes {"tags": [...], "folder": "..."} (both optional).
+
+    With a "root" (the vault path), the folder is matched from the vault root
+    down; without one, any `/Folder/` segment of the path matches."""
+    if not filters:
+        return True
+    wanted = [t.lstrip("#").lower() for t in filters.get("tags") or []]
+    if wanted:
+        have = {t.lower() for t in tags or []}
+        if not any(t in have or any(h.startswith(t + "/") for h in have) for t in wanted):
+            return False
+    folder = (filters.get("folder") or "").strip("/")
+    if folder:
+        path = path.replace("\\", "/").lower()
+        prefix = folder_prefix(filters.get("root"), folder)
+        if prefix is not None:
+            if not path.startswith(prefix):
+                return False
+        elif f"/{folder.lower()}/" not in "/" + path:
+            return False
+    return True
+
+
+def folder_prefix(root, folder):
+    """Lowercased path prefix for a folder inside the vault, or None without a root."""
+    if not root:
+        return None
+    return (str(root).replace("\\", "/").rstrip("/") + "/" + folder.strip("/") + "/").lower()
 
 
 def parse_frontmatter(text: str) -> tuple[dict, str]:

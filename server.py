@@ -135,6 +135,7 @@ class App:
             "heading": chunk.get("heading"),
             "score": None if chunk.get("via_link") else round(chunk["similarity"], 4),
             "via_link": bool(chunk.get("via_link")),
+            "via": chunk.get("via"),
             "snippet": snippet,
             "obsidian_url": self.obsidian_url(rel),
             "links": self.resolve_links(chunk.get("links", [])),
@@ -145,7 +146,7 @@ class App:
         timer = Timer()
         self.require_backend()
         chunks = retrieve(self.store, self.provider, query, top_k or self.settings.top_k,
-                          self.settings.threshold)
+                          self.settings.threshold, **self.settings.retrieval_options())
         return {"query": query, "results": [self.source(c, i + 1) for i, c in enumerate(chunks)],
                 "ms": timer.ms()}
 
@@ -182,7 +183,7 @@ class App:
                            f"Loading {self.settings.ollama_chat_model} on pc. "
                            "The first answer after a pause takes a few extra seconds."}
             chunks = retrieve(self.store, self.provider, question, self.settings.top_k,
-                              self.settings.threshold)
+                              self.settings.threshold, **self.settings.retrieval_options())
             yield {"type": "sources", "sources": [self.source(c, i + 1) for i, c in enumerate(chunks)],
                    "retrieval_ms": timer.ms()}
             first = None
@@ -207,7 +208,8 @@ class App:
         self.indexing = True
         self.index_error = None
         try:
-            ingest_vault(self.store, self.provider, self.root, log=lambda *_: None)
+            ingest_vault(self.store, self.provider, self.root, log=lambda *_: None,
+                         chunking=self.settings.chunking)
             self._names = None
         except Exception as e:
             self.index_error = str(e)

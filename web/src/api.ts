@@ -7,6 +7,7 @@ export type Source = {
   heading: string | null;
   score: number | null;
   via_link: boolean;
+  via?: "link" | "backlink" | null;
   snippet: string;
   obsidian_url: string;
   links: NoteRef[];
