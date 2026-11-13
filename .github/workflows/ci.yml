@@ -32,7 +32,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      # The tests use only the standard library, so nothing is installed.
+          cache: pip
+      # test_eval imports eval.py, which needs rich.
+      - run: pip install -r requirements.txt
       # Postgres and live Ollama tests skip themselves without
       # RAG_TEST_PG_DSN and RAG_LIVE_OLLAMA.
       - run: python -m unittest discover -s tests -t .

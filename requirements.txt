@@ -7,4 +7,5 @@ psycopg2-binary
 rich
 python-dotenv
 watchdog
-# Local provider, the web API server and the tests use only the standard library.
+# The local provider and the web API server use only the standard library.
+# The tests need only rich (tests/test_eval.py imports eval.py).
