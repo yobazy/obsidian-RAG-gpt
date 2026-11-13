@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  # Skip markdown-only changes, except the fixture vault, which is test data.
+  # (paths-ignore can't re-include, so this uses paths with negation.)
+  pull_request:
+    paths:
+      - "**"
+      - "!**/*.md"
+      - "tests/fixtures/**"
+  push:
+    branches: [main]
+    paths:
+      - "**"
+      - "!**/*.md"
+      - "tests/fixtures/**"
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: Python tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      # The tests run without these, but installing them covers eval.py's
+      # rich output path and catches broken requirements.
+      - run: pip install -r requirements.txt
+      # Postgres and live Ollama tests skip themselves without
+      # RAG_TEST_PG_DSN and RAG_LIVE_OLLAMA.
+      - run: python -m unittest discover -s tests -t .
+
+  web:
+    name: Web type check and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: web
+    env:
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      # tsc -b (type check) then vite build
+      - run: npm run build

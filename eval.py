@@ -5,8 +5,32 @@ import re
 import sys
 from pathlib import Path
 
-from rich.console import Console
-from rich.table import Table
+try:
+    from rich.console import Console
+    from rich.table import Table
+except ImportError:  # plain output, so the tests need only the standard library
+    _MARKUP = re.compile(r"\[/?[a-z ]*\]")
+
+    class Console:
+        quiet = False
+
+        def print(self, *objects):
+            if not self.quiet:
+                print(*(_MARKUP.sub("", str(o)) for o in objects))
+
+    class Table:
+        def __init__(self, title=""):
+            self.title, self.columns, self.rows = title, [], []
+
+        def add_column(self, header, **_):
+            self.columns.append(header)
+
+        def add_row(self, *cells):
+            self.rows.append(cells)
+
+        def __str__(self):
+            lines = [self.title, "\t".join(self.columns)]
+            return "\n".join(lines + ["\t".join(row) for row in self.rows])
 
 from rag.config import add_common_args, settings_from_args
 from rag.notes import note_name
