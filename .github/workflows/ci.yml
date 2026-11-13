@@ -33,7 +33,8 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      # test_eval imports eval.py, which needs rich.
+      # The tests run without these, but installing them covers eval.py's
+      # rich output path and catches broken requirements.
       - run: pip install -r requirements.txt
       # Postgres and live Ollama tests skip themselves without
       # RAG_TEST_PG_DSN and RAG_LIVE_OLLAMA.
